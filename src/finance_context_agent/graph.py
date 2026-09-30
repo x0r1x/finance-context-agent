@@ -12,10 +12,7 @@ from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import resolve_periods
 from finance_context_agent.prompts import answer_messages, critic_messages, plan_messages
-
-CONTENT_BUDGET = 4
-CLARIFY_BUDGET = 2
-OBSERVATION_CAP = 48
+from finance_context_agent.settings import Settings
 
 
 class AgentState(TypedDict, total=False):
@@ -54,7 +51,14 @@ class AgentState(TypedDict, total=False):
     schema_error: bool
 
 
-def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> Any:
+def build_graph(
+    parser: ParserClient,
+    model: JsonModel,
+    checkpointer: Any,
+    settings: Settings | None = None,
+) -> Any:
+    settings = settings or Settings()
+
     async def load(state: dict[str, Any]) -> dict[str, Any]:
         if not state.get("job_id"):
             try:
@@ -95,7 +99,7 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
         return patch
 
     async def plan(state: dict[str, Any]) -> dict[str, Any]:
-        if state.get("content_steps", 0) >= CONTENT_BUDGET:
+        if state.get("content_steps", 0) >= settings.content_budget:
             return _done(state.get("draft") or "", list(state.get("gaps") or ["budget"]))
         system, user = plan_messages(state)
         try:
@@ -107,7 +111,7 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
             "content_steps": state.get("content_steps", 0) + 1,
             "plan": {
                 "question_type": parsed.get("question_type") or "lookup",
-                "needles": needles[:4],
+                "needles": needles[: settings.max_needles],
                 "periods": list(parsed.get("periods") or []),
                 "trace": parsed.get("trace") or "none",
             },
@@ -133,23 +137,30 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
         plan_body = state.get("plan") or {}
         needles = list(plan_body.get("needles") or [])
         if not needles:
-            return _miss(state, "Пустой поиск.")
+            return _miss(state, "Пустой поиск.", settings)
         pages: list[tuple[str, dict[str, Any]]] = []
         try:
             for needle in needles:
-                pages.append((needle, await parser.search_rows(job_id, needle, limit=8)))
+                pages.append(
+                    (
+                        needle,
+                        await parser.search_rows(
+                            job_id, needle, limit=settings.catalog_search_limit
+                        ),
+                    )
+                )
         except ParserError as exc:
             return _terminal_or_raise(exc)
         if (plan_body.get("question_type") or "lookup") == "compose":
-            return _compose(state, pages)
-        return _single(state, pages)
+            return _compose(state, pages, settings)
+        return _single(state, pages, settings)
 
     async def bind(state: dict[str, Any]) -> dict[str, Any]:
         if state.get("pending") != "job":
             return {"pending": "", "terminal": ""}
         found = _match_job(state.get("human_reply") or "", state.get("jobs") or [])
         if found is None:
-            if state.get("clarify_rounds", 0) >= CLARIFY_BUDGET:
+            if state.get("clarify_rounds", 0) >= settings.clarify_budget:
                 return _done("Книга не выбрана.", ["job"])
             return {
                 "user_question": "Не нашёл такую книгу. Назовите файл ещё раз.",
@@ -183,8 +194,9 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
         plan_body = state.get("plan") or {}
         selected = list(state.get("selected") or [])
         period_ids = list(state.get("period_ids") or [])
-        depth = _depth(plan_body)
-        per_call = max(1, min(48, OBSERVATION_CAP // max(len(selected), 1)))
+        depth = _depth(plan_body, settings)
+        cap = settings.observation_cap
+        per_call = max(1, cap // max(len(selected), 1))
         observations: list[dict[str, Any]] = []
         steps = list(state.get("steps") or [])
         try:
@@ -211,21 +223,24 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
                 if document.get("truncated") and not period_ids:
                     return _ask(
                         state,
-                        "Ряд обрезан лимитом 48. Назовите период, "
+                        f"Ряд обрезан лимитом {cap}. Назовите период, "
                         "среднее по обрезанному ряду не считается.",
                         steps=steps,
+                        settings=settings,
                     )
                 observations.extend(document.get("observations") or [])
             if wants_influence(state.get("question") or "", plan_body.get("trace") or ""):
-                room = OBSERVATION_CAP - len(observations)
+                room = cap - len(observations)
                 if room > 0:
                     observations.extend(
-                        await _dependents(parser, state, selected, period_ids, steps, room)
+                        await _dependents(
+                            parser, state, selected, period_ids, steps, room, settings
+                        )
                     )
         except ParserError as exc:
             return _terminal_or_raise(exc)
         return {
-            "observations": observations[:OBSERVATION_CAP],
+            "observations": observations[:cap],
             "steps": steps,
             "awaiting": "",
             "terminal": "",
@@ -364,7 +379,16 @@ def build_graph(parser: ParserClient, model: JsonModel, checkpointer: Any) -> An
         {"ask_user": "ask_user", "answer": "answer", "close": "close"},
     )
     builder.add_edge("answer", "check")
-    builder.add_conditional_edges("check", _route_check, {"plan": "plan", "close": "close"})
+
+    def route_check(state: dict[str, Any]) -> str:
+        gaps = [str(item) for item in (state.get("gaps") or [])]
+        if not gaps or gaps == ["schema"]:
+            return "close"
+        if state.get("same_gap") or state.get("content_steps", 0) >= settings.content_budget:
+            return "close"
+        return "plan"
+
+    builder.add_conditional_edges("check", route_check, {"plan": "plan", "close": "close"})
     builder.add_edge("close", END)
     return builder.compile(checkpointer=checkpointer)
 
@@ -413,15 +437,6 @@ def _route_retrieve(state: dict[str, Any]) -> str:
     return "answer"
 
 
-def _route_check(state: dict[str, Any]) -> str:
-    gaps = [str(item) for item in (state.get("gaps") or [])]
-    if not gaps or gaps == ["schema"]:
-        return "close"
-    if state.get("same_gap") or state.get("content_steps", 0) >= CONTENT_BUDGET:
-        return "close"
-    return "plan"
-
-
 def _terminal_or_raise(exc: ParserError) -> dict[str, Any]:
     if exc.status == 409 and exc.code == "report_not_ready":
         return _done("Книга ещё собирается.", ["report_not_ready"])
@@ -442,17 +457,19 @@ def _done(draft: str, gaps: list[str]) -> dict[str, Any]:
     }
 
 
-def _depth(plan_body: dict[str, Any]) -> int:
+def _depth(plan_body: dict[str, Any], settings: Settings) -> int:
     if plan_body.get("question_type") == "explain" or plan_body.get("trace") == "precedents":
-        return 2
+        return settings.precedent_depth
     return 0
 
 
-def _miss(state: dict[str, Any], note: str) -> dict[str, Any]:
+def _miss(state: dict[str, Any], note: str, settings: Settings) -> dict[str, Any]:
     misses = state.get("search_misses", 0) + 1
     if misses >= 2:
         return _ask(
-            state, "Такой строки нет. Назовите подпись иначе или выберите другую метрику."
+            state,
+            "Такой строки нет. Назовите подпись иначе или выберите другую метрику.",
+            settings=settings,
         ) | {
             "search_misses": misses,
             "search_note": note,
@@ -466,25 +483,31 @@ def _miss(state: dict[str, Any], note: str) -> dict[str, Any]:
     }
 
 
-def _single(state: dict[str, Any], pages: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+def _single(
+    state: dict[str, Any], pages: list[tuple[str, dict[str, Any]]], settings: Settings
+) -> dict[str, Any]:
     if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
         note = ", ".join(needle for needle, _page in pages)
-        return _miss(state, f"Нет совпадений: {note}.")
+        return _miss(state, f"Нет совпадений: {note}.", settings)
     rows = _distinct_rows(pages)
     if any(int(page.get("total") or 0) != 1 for _needle, page in pages) or len(rows) != 1:
-        return _ask(state, _choice_question(pages))
-    return _select(state, rows)
+        return _ask(state, _choice_question(pages), settings=settings)
+    return _select(state, rows, settings)
 
 
-def _compose(state: dict[str, Any], pages: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+def _compose(
+    state: dict[str, Any], pages: list[tuple[str, dict[str, Any]]], settings: Settings
+) -> dict[str, Any]:
     if any(int(page.get("total") or 0) != 1 for _needle, page in pages):
         if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
-            return _miss(state, "Нет совпадений по метрикам.")
-        return _ask(state, _choice_question(pages))
-    return _select(state, _distinct_rows(pages))
+            return _miss(state, "Нет совпадений по метрикам.", settings)
+        return _ask(state, _choice_question(pages), settings=settings)
+    return _select(state, _distinct_rows(pages), settings)
 
 
-def _select(state: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _select(
+    state: dict[str, Any], rows: list[dict[str, Any]], settings: Settings
+) -> dict[str, Any]:
     plan_body = state.get("plan") or {}
     requested = list(plan_body.get("periods") or [])
     period_ids: list[str] | None = None
@@ -495,13 +518,23 @@ def _select(state: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]
             list(row.get("axis_ids") or []),
         )
         if error == "many":
-            return _ask(state, "Период подходит нескольким ключам оси. Назовите один.")
+            return _ask(
+                state, "Период подходит нескольким ключам оси. Назовите один.", settings=settings
+            )
         if error == "none":
-            return _ask(state, "Период не находится на оси строки. Назовите ключ или год.")
+            return _ask(
+                state,
+                "Период не находится на оси строки. Назовите ключ или год.",
+                settings=settings,
+            )
         if period_ids is None:
             period_ids = keys
         elif keys != period_ids:
-            return _ask(state, "Период не один на всех выбранных строках. Назовите ключ.")
+            return _ask(
+                state,
+                "Период не один на всех выбранных строках. Назовите ключ.",
+                settings=settings,
+            )
     period_ids = period_ids or []
     selected = [_compact_row(row) for row in rows]
     steps = list(state.get("steps") or [])
@@ -526,11 +559,15 @@ def _select(state: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def _ask(
-    state: dict[str, Any], question: str, steps: list[dict[str, Any]] | None = None
+    state: dict[str, Any],
+    question: str,
+    steps: list[dict[str, Any]] | None = None,
+    *,
+    settings: Settings,
 ) -> dict[str, Any]:
     if (
         question == state.get("last_user_question")
-        or state.get("clarify_rounds", 0) >= CLARIFY_BUDGET
+        or state.get("clarify_rounds", 0) >= settings.clarify_budget
     ):
         return _done(state.get("draft") or "Не смог выбрать строку.", ["clarify"])
     patch: dict[str, Any] = {
@@ -618,17 +655,20 @@ async def _dependents(
     period_ids: list[str],
     steps: list[dict[str, Any]],
     remaining: int,
+    settings: Settings,
 ) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     origin_keys = {row["row_key"] for row in selected}
     for row in selected:
-        traced = await parser.trace_dependents(state["job_id"], row["row_key"], depth=2)
+        traced = await parser.trace_dependents(
+            state["job_id"], row["row_key"], depth=settings.precedent_depth
+        )
         keys = []
         for node in traced.get("nodes") or []:
             key = node.get("row_key")
             if key and key not in origin_keys and key not in keys:
                 keys.append(key)
-        for key in keys[:4]:
+        for key in keys[: settings.max_dependent_rows]:
             if remaining <= 0:
                 return found
             document = await parser.get_observations(
@@ -636,7 +676,7 @@ async def _dependents(
                 row_key=key,
                 period_ids=period_ids,
                 precedent_depth=0,
-                limit=min(8, remaining),
+                limit=min(settings.dependent_observation_limit, remaining),
             )
             steps.append(
                 {

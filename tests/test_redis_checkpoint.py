@@ -10,9 +10,9 @@ import pytest
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
-from finance_context_agent.app import SAVER_TTL
 from finance_context_agent.graph import build_graph
 from finance_context_agent.lock import RedisThreadLock
+from finance_context_agent.settings import Settings
 from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
     FakeParser,
@@ -108,8 +108,9 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
     config = run_config("thread-redis")
+    ttl = Settings(_env_file=None).saver_ttl()
 
-    async with AsyncRedisSaver.from_conn_string(redis_url, ttl=SAVER_TTL) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
         graph = build_graph(parser, model, saver)
         await graph.ainvoke(
@@ -123,7 +124,7 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
     )
     model.push("critic", {"gaps": []})
-    async with AsyncRedisSaver.from_conn_string(redis_url, ttl=SAVER_TTL) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
         graph = build_graph(parser, model, saver)
         await graph.ainvoke(Command(resume="Наблюдённый, не лимит"), config, durability="sync")

@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-PARSER_TIMEOUT = httpx.Timeout(15.0)
+from finance_context_agent.settings import field_default
 
 
 class ParserError(Exception):
@@ -22,9 +22,16 @@ class ParserError(Exception):
 
 
 class ParserClient:
-    def __init__(self, base_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        client: httpx.AsyncClient | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         self._base = base_url.rstrip("/")
-        self._client = client or httpx.AsyncClient(timeout=PARSER_TIMEOUT)
+        seconds = field_default("parser_timeout_sec") if timeout is None else timeout
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(float(seconds)))
         self._owns_client = client is None
         self._bodies: dict[str, Any] = {}
         self._etags: dict[str, str] = {}

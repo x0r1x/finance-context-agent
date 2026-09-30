@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from finance_context_agent.settings import Settings, field_default
+
 
 def new_turn_input(question: str, job_id: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -39,5 +41,6 @@ def new_turn_input(question: str, job_id: str | None = None) -> dict[str, Any]:
     return payload
 
 
-def run_config(thread_id: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 40}
+def run_config(thread_id: str, settings: Settings | None = None) -> dict[str, Any]:
+    limit = settings.recursion_limit if settings is not None else field_default("recursion_limit")
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": limit}
