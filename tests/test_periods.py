@@ -1,4 +1,8 @@
-from finance_context_agent.periods import periods_named_in_question, resolve_periods
+from finance_context_agent.periods import (
+    periods_from_question,
+    periods_named_in_question,
+    resolve_periods,
+)
 from tests.fakes import two_first_years, year_axes
 
 
@@ -97,6 +101,85 @@ def test_y1_does_not_match_inside_y10() -> None:
 def test_calendar_year_is_not_taken_from_a_y_key() -> None:
     axes = [{"id": "forecast", "periods": [{"period_key": "Y1"}, {"period_key": "Y2"}]}]
     assert periods_named_in_question("Какой DSCR в 2030?", axes) == []
+
+
+def test_blank_spec_does_not_drop_the_next_key() -> None:
+    axes = [{"id": "forecast", "periods": [{"period_key": "Y5"}, {"period_key": "Y10"}]}]
+    keys, error = resolve_periods(
+        [{"period_key": ""}, {"period_key": "Y10"}],
+        axes,
+        ["forecast"],
+    )
+    assert error is None
+    assert keys == ["Y10"]
+
+
+def test_question_keys_are_y5_and_y10() -> None:
+    axes = [{"id": "forecast", "periods": [{"period_key": "Y5"}, {"period_key": "Y10"}]}]
+    assert periods_from_question("Сравни EBITDA в Y5 и в Y10.", axes) == [
+        {"period_key": "Y5"},
+        {"period_key": "Y10"},
+    ]
+
+
+def test_construction_phase_year_is_not_the_first_operation() -> None:
+    axes = [
+        {
+            "id": "timeline",
+            "periods": [
+                {"period_key": "2024", "phase": "construction", "phase_year": 1},
+                {"period_key": "2026", "phase": "operation", "phase_year": 1},
+            ],
+        }
+    ]
+    keys, error = resolve_periods(
+        periods_from_question("Какой EBITDA в первый операционный год?", axes),
+        axes,
+        ["timeline"],
+    )
+    assert error is None
+    assert keys == ["2026"]
+
+
+def test_repayment_start_reads_the_sibling_axis() -> None:
+    bare = [{"period_key": "Y1"}, {"period_key": "Y5"}]
+    tba = [
+        {
+            "period_key": "Y1",
+            "phase": "construction",
+            "phase_year": 1,
+            "flags": {"repayment start date": False},
+        },
+        {
+            "period_key": "Y5",
+            "phase": "operation",
+            "phase_year": 1,
+            "flags": {"repayment start date": True, "repayment": True},
+        },
+    ]
+    axes = [{"id": "P&L!r2", "periods": bare}, {"id": "TBA!r2", "periods": tba}]
+    keys, error = resolve_periods(
+        periods_from_question("Какой Debt service в год начала погашения?", axes),
+        axes,
+        ["P&L!r2"],
+    )
+    assert error is None
+    assert keys == ["Y5"]
+
+
+def test_calendar_year_is_requested_when_it_is_not_a_key() -> None:
+    axes = [{"id": "forecast", "periods": [{"period_key": "Y1"}]}]
+    assert periods_from_question("Какой EBITDA в 2030?", axes) == [{"year": "2030"}]
+    keys, error = resolve_periods([{"year": "2030"}], axes, ["forecast"])
+    assert keys == []
+    assert error == "none"
+
+
+def test_empty_axis_does_not_borrow_a_calendar_year() -> None:
+    axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
+    keys, error = resolve_periods([{"year": "2030"}], axes, [])
+    assert keys == []
+    assert error == "none"
 
 
 def test_two_requested_periods_stay_in_order() -> None:

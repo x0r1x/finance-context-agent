@@ -10,11 +10,11 @@ from langgraph.types import interrupt
 from finance_context_agent.citations import verify_answer, wants_influence
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
-from finance_context_agent.periods import periods_named_in_question, resolve_periods
+from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import answer_messages, critic_messages, plan_messages
 from finance_context_agent.settings import Settings
 
-_TOKEN_EDGE = "?.!,;:«»\"'()[]"
+_TOKEN_EDGE = "?.!,;:«»\"'[]"
 
 
 class AgentState(TypedDict, total=False):
@@ -51,6 +51,8 @@ class AgentState(TypedDict, total=False):
     last_user_question: str
     clarify_rounds: int
     schema_error: bool
+    draft_from_cache: bool
+    cache_missing: bool
 
 
 def build_graph(
@@ -103,17 +105,24 @@ def build_graph(
     async def plan(state: dict[str, Any]) -> dict[str, Any]:
         if state.get("content_steps", 0) >= settings.content_budget:
             return _done(state.get("draft") or "", list(state.get("gaps") or ["budget"]))
+        question = str(state.get("question") or "")
+        axes = list(state.get("axes") or [])
+        reply = str(state.get("human_reply") or "").strip()
+        mention = question_mention(question, axes)
+        named = periods_from_question(question, axes)
+        # Two metric names and no year still need the model to mark the question compose.
+        metric_compose = (
+            "сравни" in question.casefold() and len(mention.split()) >= 2 and len(named) < 2
+        )
+        if mention and not reply and not metric_compose:
+            return _question_plan(state, mention, named, settings)
         system, user = plan_messages(state)
         try:
             parsed = await model.complete_json(role="plan", system=system, user=user)
         except SchemaError:
             return _done("Модель не вернула план.", ["schema"])
         needles = [str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()]
-        periods = list(parsed.get("periods") or [])
-        if not periods:
-            periods = periods_named_in_question(
-                str(state.get("question") or ""), list(state.get("axes") or [])
-            )
+        periods = named or list(parsed.get("periods") or [])
         return {
             "content_steps": state.get("content_steps", 0) + 1,
             "plan": {
@@ -121,9 +130,12 @@ def build_graph(
                 "needles": needles[: settings.max_needles],
                 "periods": periods,
                 "trace": parsed.get("trace") or "none",
+                "source": "model",
             },
             "human_reply": "",
             "search_again": False,
+            "draft_from_cache": False,
+            "cache_missing": False,
             "terminal": "",
         }
 
@@ -158,6 +170,7 @@ def build_graph(
             )
         except ParserError as exc:
             return _terminal_or_raise(exc)
+        pages = [_narrow_page(needle, page) for needle, page in pages]
         if not pages:
             return _miss(state, "Пустой поиск.", settings)
         if (plan_body.get("question_type") or "lookup") == "compose":
@@ -217,6 +230,9 @@ def build_graph(
                     precedent_depth=depth,
                     limit=per_call,
                 )
+                batch = [
+                    _scalar_observation(item) for item in (document.get("observations") or [])
+                ]
                 steps.append(
                     {
                         "kind": "observations",
@@ -224,8 +240,7 @@ def build_graph(
                         "period_ids": period_ids,
                         "precedent_depth": depth,
                         "ids": [
-                            f"{item.get('row_key')}:{item.get('period_id')}"
-                            for item in document.get("observations") or []
+                            f"{item.get('row_key')}:{item.get('period_id')}" for item in batch
                         ],
                     }
                 )
@@ -237,7 +252,13 @@ def build_graph(
                         steps=steps,
                         settings=settings,
                     )
-                observations.extend(document.get("observations") or [])
+                observations.extend(batch)
+            if (
+                plan_body.get("source") == "question"
+                and not period_ids
+                and len(observations) > 1
+            ):
+                return _ask(state, "Назовите период.", steps=steps, settings=settings)
             if wants_influence(state.get("question") or "", plan_body.get("trace") or ""):
                 room = cap - len(observations)
                 if room > 0:
@@ -256,6 +277,16 @@ def build_graph(
         }
 
     async def answer(state: dict[str, Any]) -> dict[str, Any]:
+        if (state.get("plan") or {}).get("source") == "question":
+            built = _cache_answer(state)
+            return {
+                "draft": built["draft"],
+                "proposed_citations": built["citations"],
+                "draft_from_cache": True,
+                "cache_missing": built["missing"],
+                "schema_error": False,
+                "terminal": "",
+            }
         system, user = answer_messages(state)
         try:
             parsed = await model.complete_json(role="answer", system=system, user=user)
@@ -265,11 +296,15 @@ def build_graph(
                 "gaps": ["schema"],
                 "satisfactory": False,
                 "draft": "Модель не вернула ответ.",
+                "draft_from_cache": False,
+                "cache_missing": False,
                 "terminal": "",
             }
         return {
             "draft": str(parsed.get("text") or ""),
             "proposed_citations": list(parsed.get("citations") or []),
+            "draft_from_cache": False,
+            "cache_missing": False,
             "schema_error": False,
             "terminal": "",
         }
@@ -285,14 +320,36 @@ def build_graph(
                 "terminal": "",
             }
         plan_body = state.get("plan") or {}
+        if state.get("cache_missing"):
+            gaps = ["number:missing"]
+            return {
+                "gaps": gaps,
+                "gap_keys": gaps,
+                "same_gap": True,
+                "satisfactory": False,
+                "citations": [],
+                "terminal": "",
+            }
+        proposed = list(state.get("proposed_citations") or [])
+        observed = list(state.get("observations") or [])
         code_gaps = verify_answer(
             question=state.get("question") or "",
             question_type=plan_body.get("question_type") or "lookup",
             trace=plan_body.get("trace") or "none",
             text=state.get("draft") or "",
-            citations=list(state.get("proposed_citations") or []),
-            observations=list(state.get("observations") or []),
+            citations=proposed,
+            observations=observed,
         )
+        scale_only = bool(code_gaps) and all(str(item).startswith("scale:") for item in code_gaps)
+        if scale_only or (not code_gaps and state.get("draft_from_cache")):
+            return {
+                "gaps": [],
+                "gap_keys": [],
+                "same_gap": False,
+                "satisfactory": True,
+                "citations": _accepted_citations(proposed, observed),
+                "terminal": "",
+            }
         if code_gaps:
             return {
                 "gaps": code_gaps,
@@ -334,8 +391,11 @@ def build_graph(
         if not satisfactory:
             if any(item.startswith("number:") for item in gaps):
                 draft = "Подтверждённого числа в срезе нет."
-            if gaps:
-                draft = f"{draft}\nНе хватает: {'; '.join(gaps)}".strip()
+            visible = gaps
+            if state.get("citations"):
+                visible = [item for item in gaps if not item.startswith("scale:")]
+            if visible:
+                draft = f"{draft}\nНе хватает: {'; '.join(visible)}".strip()
             elif not draft:
                 draft = "Ответ не собран."
         steps = list(state.get("steps") or [])
@@ -546,6 +606,14 @@ def _select(
                 settings=settings,
             )
     period_ids = period_ids or []
+    if not period_ids and periods_from_question(
+        str(state.get("question") or ""), list(state.get("axes") or [])
+    ):
+        return _ask(
+            state,
+            "Период не находится на оси строки. Назовите ключ или год.",
+            settings=settings,
+        )
     selected = [_compact_row(row) for row in rows]
     steps = list(state.get("steps") or [])
     steps.append(
@@ -617,6 +685,221 @@ def _actionable_critic_gaps(items: list[Any]) -> list[str]:
         if gap in _CRITIC_EXACT or gap.startswith(("cell:", "number:", "scale:")):
             kept.append(gap)
     return kept
+
+
+_MENTION_STOP = frozenset(
+    {
+        "какой",
+        "какая",
+        "какое",
+        "какие",
+        "почему",
+        "равен",
+        "равна",
+        "равно",
+        "сравни",
+        "в",
+        "и",
+        "на",
+        "за",
+        "по",
+        "год",
+        "года",
+        "году",
+        "первый",
+        "первая",
+        "первое",
+        "операционный",
+        "операционного",
+        "операционном",
+        "начала",
+        "начало",
+        "погашения",
+    }
+)
+_MENTION_EDGE = "?.!,;:«»\"'"
+_WHY_PHRASES = ("почему", "из чего", "why")
+_STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
+
+
+def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
+    """Label text left after period keys, function words, and a bare number."""
+    period_keys = {
+        str(period.get("period_key") or "").casefold()
+        for axis in axes
+        for period in axis.get("periods") or []
+        if period.get("period_key")
+    }
+    tokens: list[str] = []
+    for raw in question.split():
+        token = raw.strip(_MENTION_EDGE)
+        folded = token.casefold()
+        if len(folded) < 2 or folded in _MENTION_STOP or folded in period_keys:
+            continue
+        if folded.isdigit():
+            continue
+        tokens.append(token)
+    return " ".join(tokens)
+
+
+def _question_plan(
+    state: dict[str, Any],
+    mention: str,
+    periods: list[dict[str, str]],
+    settings: Settings,
+) -> dict[str, Any]:
+    question = str(state.get("question") or "")
+    folded = question.casefold()
+    why = any(phrase in folded for phrase in _WHY_PHRASES)
+    if len(periods) >= 2 or "сравни" in folded:
+        question_type = "compare"
+    elif why:
+        question_type = "explain"
+    else:
+        question_type = "lookup"
+    return {
+        "content_steps": state.get("content_steps", 0) + 1,
+        "plan": {
+            "question_type": question_type,
+            "needles": [mention][: settings.max_needles],
+            "periods": periods,
+            "trace": "precedents" if why else "none",
+            "source": "question",
+        },
+        "human_reply": "",
+        "search_again": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "terminal": "",
+    }
+
+
+def narrow_hits(mention: str, page: dict[str, Any]) -> list[dict[str, Any]]:
+    """Exact label beats a longer label only when the concept differs."""
+    folded = mention.casefold().strip()
+    rows = list(page.get("rows") or [])
+    if not folded:
+        return rows
+    exact = [row for row in rows if str(row.get("label") or "").casefold() == folded]
+    if not exact:
+        return rows
+    concepts = {row.get("concept_id") for row in exact if row.get("concept_id")}
+    longer = []
+    for row in rows:
+        if row in exact:
+            continue
+        label = str(row.get("label") or "").casefold()
+        if folded not in label:
+            continue
+        concept = row.get("concept_id")
+        if concept and concept in concepts:
+            longer.append(row)
+    return exact + longer
+
+
+def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    rows = list(page.get("rows") or [])
+    total = int(page.get("total") or 0)
+    kept = narrow_hits(mention, page)
+    if len(kept) == len(rows):
+        return mention, page
+    truncated = total > len(rows)
+    if truncated and len(kept) <= 1:
+        return mention, {**page, "rows": kept or rows, "total": total}
+    return mention, {**page, "rows": kept, "total": len(kept)}
+
+
+def _cache_answer(state: dict[str, Any]) -> dict[str, Any]:
+    selected = list(state.get("selected") or [])
+    period_ids = [str(item) for item in (state.get("period_ids") or [])]
+    wanted = {row.get("row_key") for row in selected}
+    scoped = [
+        item
+        for item in (state.get("observations") or [])
+        if item.get("row_key") in wanted
+        and (not period_ids or str(item.get("period_id") or "") in period_ids)
+    ]
+    if period_ids:
+        found = {(item.get("row_key"), str(item.get("period_id") or "")) for item in scoped}
+        missing = any(
+            (row.get("row_key"), period_id) not in found
+            for row in selected
+            for period_id in period_ids
+        )
+        if missing:
+            return {
+                "draft": "Подтверждённого числа в срезе нет.",
+                "citations": [],
+                "missing": True,
+            }
+        ordered = []
+        for row in selected:
+            for period_id in period_ids:
+                ordered.append(
+                    next(
+                        item
+                        for item in scoped
+                        if item.get("row_key") == row.get("row_key")
+                        and str(item.get("period_id") or "") == period_id
+                    )
+                )
+    elif len(scoped) == 1:
+        ordered = scoped
+    else:
+        return {"draft": "Подтверждённого числа в срезе нет.", "citations": [], "missing": True}
+    lines: list[str] = []
+    citations: list[dict[str, Any]] = []
+    for item in ordered:
+        line, citation = _line_from_observation(item)
+        lines.append(line)
+        citations.append(citation)
+    return {"draft": "\n".join(lines), "citations": citations, "missing": False}
+
+
+def _scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
+    """A params column keyed ``value`` is the scalar slot, not a period on an axis."""
+    period = str(item.get("period_id") or "")
+    if period.casefold() != "value":
+        return item
+    return {**item, "period_id": ""}
+
+
+def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    item = _scalar_observation(item)
+    status = str(item.get("value_status") or "")
+    label = str(item.get("label") or item.get("row_key") or "")
+    period_id = str(item.get("period_id") or "")
+    if status in _STATUS_WORDS:
+        text_value = _STATUS_WORDS[status]
+        cited_value = ""
+    else:
+        cited_value = "" if item.get("value") is None else str(item.get("value"))
+        text_value = cited_value
+        if status != "zero_explicit" and _needs_scale_word(item):
+            text_value = f"{text_value} тыс."
+    if period_id:
+        line = f"{label} в {period_id}: {text_value}"
+    else:
+        line = f"{label}: {text_value}"
+    citation: dict[str, Any] = {
+        "row_key": item.get("row_key"),
+        "period_id": period_id,
+        "cell": (item.get("source") or {}).get("cell") or "",
+        "value": cited_value,
+        "value_status": status,
+    }
+    normalized = item.get("normalized_value")
+    if normalized not in (None, ""):
+        citation["normalized_value"] = normalized
+    return line, citation
+
+
+def _needs_scale_word(item: dict[str, Any]) -> bool:
+    factor = item.get("scale_factor")
+    if factor in (None, 1):
+        return False
+    scale = ((item.get("unit") or {}).get("scale") or "").casefold()
+    return scale == "k"
 
 
 def _phrase_tokens(needle: str, period_keys: set[str]) -> list[str]:
@@ -763,17 +1046,16 @@ async def _dependents(
                 precedent_depth=0,
                 limit=min(settings.dependent_observation_limit, remaining),
             )
+            batch = [
+                _scalar_observation(item) for item in (document.get("observations") or [])
+            ]
             steps.append(
                 {
                     "kind": "dependents",
                     "row_key": key,
-                    "ids": [
-                        f"{item.get('row_key')}:{item.get('period_id')}"
-                        for item in document.get("observations") or []
-                    ],
+                    "ids": [f"{item.get('row_key')}:{item.get('period_id')}" for item in batch],
                 }
             )
-            batch = list(document.get("observations") or [])
             found.extend(batch)
             remaining -= len(batch)
     return found
