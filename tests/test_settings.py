@@ -71,7 +71,7 @@ def test_defaults_match_today(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.content_budget == 4
     assert settings.clarify_budget == 2
     assert settings.observation_cap == 48
-    assert settings.catalog_search_limit == 8
+    assert settings.catalog_search_limit == 32
     assert settings.precedent_depth == 2
     assert settings.max_needles == 4
     assert settings.max_dependent_rows == 4

@@ -18,6 +18,11 @@ class SchemaError(Exception):
 class ModelError(Exception):
     """The model endpoint did not answer."""
 
+    def __init__(self, message: str, *, status: int | None = None, body: str = "") -> None:
+        self.status = status
+        self.body = body[:300]
+        super().__init__(message)
+
 
 class JsonModel(Protocol):
     async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]: ...
@@ -31,6 +36,77 @@ def chat_completions_url(base_url: str) -> str:
     if not path.endswith("/chat/completions"):
         path = f"{path}/chat/completions"
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+_SCHEMAS: dict[str, dict[str, Any]] = {
+    "plan": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "question_type": {
+                "type": "string",
+                "enum": ["lookup", "compare", "explain", "compose"],
+            },
+            "needles": {
+                "type": "array",
+                "description": "Только подпись строки, без слова какой. Например EBITDA или Debt.",
+                "items": {"type": "string"},
+            },
+            "periods": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "period_key": {"type": "string"},
+                        "year": {"type": "string"},
+                        "phase_year": {"type": "integer"},
+                    },
+                },
+            },
+            "trace": {"type": "string", "enum": ["none", "precedents", "dependents"]},
+        },
+        "required": ["question_type", "needles", "periods", "trace"],
+    },
+    "answer": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "text": {"type": "string"},
+            "citations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "row_key": {"type": "string"},
+                        "period_id": {"type": "string"},
+                        "cell": {"type": "string"},
+                        "value": {"type": "string"},
+                        "value_status": {"type": "string"},
+                        "normalized_value": {"type": "string"},
+                    },
+                    "required": ["row_key", "period_id"],
+                },
+            },
+        },
+        "required": ["text", "citations"],
+    },
+    "critic": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"gaps": {"type": "array", "items": {"type": "string"}}},
+        "required": ["gaps"],
+    },
+}
+
+
+def response_format_for(role: str) -> dict[str, Any]:
+    """OpenAI Chat Completions structured output for one graph role."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": role, "strict": True, "schema": _SCHEMAS[role]},
+    }
 
 
 class OpenAIChat:
@@ -64,7 +140,7 @@ class OpenAIChat:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": response_format_for(role),
         }
         last = "empty"
         for _ in range(2):
@@ -73,7 +149,11 @@ class OpenAIChat:
             except httpx.HTTPError as exc:
                 raise ModelError(str(exc)) from exc
             if response.status_code >= 400:
-                raise ModelError(f"{response.status_code}")
+                raise ModelError(
+                    str(response.status_code),
+                    status=response.status_code,
+                    body=response.text[:300],
+                )
             content = _message_content(response.json())
             try:
                 parsed = json.loads(content)

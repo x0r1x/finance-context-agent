@@ -128,6 +128,19 @@ def test_scale_word_required_for_display_value() -> None:
     assert present == []
 
 
+def test_explicit_zero_does_not_need_a_scale_word() -> None:
+    obs = observation(
+        "row", "Y1", "0", "C10", status="zero_explicit", scale_factor=1000, scale="k"
+    )
+    gaps = _check(
+        "EBITDA 0.",
+        [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}],
+        [obs],
+        question="Какой EBITDA в Y1?",
+    )
+    assert "scale:row" not in gaps
+
+
 def test_normalized_value_does_not_need_a_scale_word() -> None:
     obs = observation("row", "2030", "1.2", "C10", scale_factor=1000, scale="k", normalized="1200")
     gaps = _check(
@@ -157,6 +170,48 @@ def test_compare_needs_two_sides() -> None:
         question_type="compare",
     )
     assert gaps == ["compare_sides"]
+
+
+def test_explain_label_without_a_why_question_does_not_need_a_precedent() -> None:
+    obs = observation("row", "Y1", "0", "C10", status="zero_explicit")
+    citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
+    gaps = _check(
+        "EBITDA 0.",
+        citation,
+        [obs],
+        question="Какой EBITDA в Y1?",
+        question_type="explain",
+        trace="none",
+    )
+    assert "precedent" not in gaps
+
+
+def test_why_question_still_needs_a_precedent() -> None:
+    obs = observation("row", "Y1", "0", "C10", status="zero_explicit")
+    citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
+    gaps = _check(
+        "Почему EBITDA равен 0?",
+        citation,
+        [obs],
+        question="Почему EBITDA равен 0?",
+        question_type="lookup",
+        trace="none",
+    )
+    assert "precedent" in gaps
+
+
+def test_precedent_trace_needs_a_precedent_even_on_a_lookup_question() -> None:
+    obs = observation("row", "Y1", "0", "C10", status="zero_explicit")
+    citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
+    gaps = _check(
+        "EBITDA 0.",
+        citation,
+        [obs],
+        question="Какой EBITDA в Y1?",
+        question_type="lookup",
+        trace="precedents",
+    )
+    assert "precedent" in gaps
 
 
 def test_why_without_precedent_fails_until_a_precedent_is_cited() -> None:

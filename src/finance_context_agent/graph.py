@@ -10,9 +10,49 @@ from langgraph.types import interrupt
 from finance_context_agent.citations import verify_answer, wants_influence
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
-from finance_context_agent.periods import resolve_periods
+from finance_context_agent.periods import periods_named_in_question, resolve_periods
 from finance_context_agent.prompts import answer_messages, critic_messages, plan_messages
 from finance_context_agent.settings import Settings
+
+_QUESTION_WORDS = frozenset(
+    {
+        "какой",
+        "какая",
+        "какое",
+        "какие",
+        "каков",
+        "какова",
+        "каковы",
+        "сколько",
+        "what",
+        "which",
+        "how",
+        "much",
+        "is",
+        "в",
+        "во",
+        "на",
+        "за",
+        "для",
+        "по",
+        "из",
+        "и",
+        "of",
+        "in",
+        "for",
+        "the",
+        "a",
+        "an",
+        "to",
+    }
+)
+_METRIC_ALIASES = {
+    "долг": "Debt",
+    "долга": "Debt",
+    "долгу": "Debt",
+    "долгом": "Debt",
+    "долги": "Debt",
+}
 
 
 class AgentState(TypedDict, total=False):
@@ -107,12 +147,17 @@ def build_graph(
         except SchemaError:
             return _done("Модель не вернула план.", ["schema"])
         needles = [str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()]
+        periods = list(parsed.get("periods") or [])
+        if not periods:
+            periods = periods_named_in_question(
+                str(state.get("question") or ""), list(state.get("axes") or [])
+            )
         return {
             "content_steps": state.get("content_steps", 0) + 1,
             "plan": {
                 "question_type": parsed.get("question_type") or "lookup",
                 "needles": needles[: settings.max_needles],
-                "periods": list(parsed.get("periods") or []),
+                "periods": periods,
                 "trace": parsed.get("trace") or "none",
             },
             "human_reply": "",
@@ -135,7 +180,23 @@ def build_graph(
                 "terminal": "",
             }
         plan_body = state.get("plan") or {}
-        needles = list(plan_body.get("needles") or [])
+        period_keys = {
+            str(period.get("period_key")).casefold()
+            for axis in state.get("axes") or []
+            for period in axis.get("periods") or []
+            if period.get("period_key")
+        }
+        needles: list[str] = []
+        seen_needles: set[str] = set()
+        for raw in list(plan_body.get("needles") or []):
+            cleaned = _catalog_needle(str(raw), period_keys)
+            if not cleaned:
+                continue
+            folded = cleaned.casefold()
+            if folded in seen_needles:
+                continue
+            seen_needles.add(folded)
+            needles.append(cleaned)
         if not needles:
             return _miss(state, "Пустой поиск.", settings)
         pages: list[tuple[str, dict[str, Any]]] = []
@@ -303,7 +364,7 @@ def build_graph(
                 "satisfactory": False,
                 "terminal": "",
             }
-        critic_gaps = [str(item) for item in (parsed.get("gaps") or [])]
+        critic_gaps = _actionable_critic_gaps(list(parsed.get("gaps") or []))
         return {
             "gaps": critic_gaps,
             "gap_keys": critic_gaps,
@@ -489,9 +550,10 @@ def _single(
     if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
         note = ", ".join(needle for needle, _page in pages)
         return _miss(state, f"Нет совпадений: {note}.", settings)
-    rows = _distinct_rows(pages)
-    if any(int(page.get("total") or 0) != 1 for _needle, page in pages) or len(rows) != 1:
-        return _ask(state, _choice_question(pages), settings=settings)
+    useful = [(needle, page) for needle, page in pages if int(page.get("total") or 0) > 0]
+    rows = _distinct_rows(useful)
+    if any(int(page.get("total") or 0) != 1 for _needle, page in useful) or len(rows) != 1:
+        return _ask(state, _choice_question(useful), settings=settings)
     return _select(state, rows, settings)
 
 
@@ -596,12 +658,44 @@ def _distinct_rows(pages: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return rows
 
 
+_CRITIC_EXACT = {"compare_sides", "precedent", "schema"}
+
+
+def _actionable_critic_gaps(items: list[Any]) -> list[str]:
+    """Keep critic notes the code can replan. A free-text nag must not hide a checked citation."""
+    kept: list[str] = []
+    for item in items:
+        gap = str(item).strip()
+        if gap in _CRITIC_EXACT or gap.startswith(("cell:", "number:", "scale:")):
+            kept.append(gap)
+    return kept
+
+
+def _catalog_needle(needle: str, period_keys: set[str]) -> str:
+    """Drop question words and period keys. A Russian debt word searches as Debt."""
+    kept: list[str] = []
+    for raw in needle.split():
+        token = raw.strip("?.!,;:«»\"'()[]")
+        folded = token.casefold()
+        if not folded or folded in _QUESTION_WORDS or folded in period_keys:
+            continue
+        kept.append(token)
+    if not kept:
+        return ""
+    phrase = " ".join(kept)
+    return _METRIC_ALIASES.get(phrase.casefold(), phrase)
+
+
 def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
     lines: list[str] = []
     for needle, page in pages:
         total = int(page.get("total") or 0)
-        labels = "; ".join(_label(row) for row in (page.get("rows") or []))
-        lines.append(f"«{needle}»: {total}. {labels}")
+        rows = page.get("rows") or []
+        labels = "; ".join(_label(row) for row in rows)
+        line = f"«{needle}»: {total}. {labels}"
+        if total > len(rows):
+            line += f" Показаны первые {len(rows)} из {total}."
+        lines.append(line)
     return "Какую строку взять?\n" + "\n".join(lines)
 
 

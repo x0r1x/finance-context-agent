@@ -17,7 +17,9 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
         "precedents — вопрос «почему» или «из чего». dependents — «на что влияет». "
         "Пустой periods, если период не назван. Если человек уже уточнил строку, сузь needles. "
         "Дыра precedent означает trace precedents и question_type explain. "
-        "Промах поиска меняет needles, а не выдумывает row_key."
+        "Промах поиска меняет needles, а не выдумывает row_key. "
+        "needles — только подписи строк, без слова «какой». Период пиши в periods, не в needles. "
+        "explain — только если вопрос про почему или из чего."
     )
     citations = [
         {
@@ -68,12 +70,24 @@ def answer_messages(state: dict[str, Any]) -> tuple[str, str]:
 def critic_messages(state: dict[str, Any]) -> tuple[str, str]:
     system = (
         "Найди дыры ответа относительно вопроса. Новых чисел не пиши. "
+        "Если текст уже называет value цитаты, верни пустой gaps. "
+        "Не проси валюту, масштаб и предшественников. "
         'JSON: {"gaps": ["короткая дыра"]}. Пустой список, если цитаты закрывают вопрос.'
     )
+    citations = [
+        {
+            "row_key": item.get("row_key"),
+            "period_id": item.get("period_id"),
+            "value": item.get("value"),
+            "value_status": item.get("value_status"),
+        }
+        for item in state.get("proposed_citations") or []
+    ]
     user = json.dumps(
         {
             "question": state.get("question"),
             "text": state.get("draft") or "",
+            "citations": citations,
             "gaps_already_found": state.get("gaps") or [],
         },
         ensure_ascii=False,

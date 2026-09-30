@@ -39,3 +39,6 @@ def test_plan_prompt_has_axes_and_not_a_catalog_page() -> None:
     assert "CATALOG_PAGE" not in user
     assert "SHOULD_NOT_LEAK" not in user
     assert "context.json" not in system + user
+    assert "не в needles" in system
+    assert "без слова «какой»" in system
+    assert "почему или из чего" in system
