@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from finance_context_agent.settings import Settings, field_default
+from finance_context_agent.settings import Settings, field_default, normalize_base_url
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 _MSGPACK_PROBE = (
@@ -139,3 +139,64 @@ def test_dotenv_msgpack_flag_reaches_langgraph(tmp_path: Path) -> None:
     result = _probe_msgpack(tmp_path)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0"
+
+
+class _DockerPath:
+    def __init__(self, value: object) -> None:
+        self._value = str(value)
+
+    def exists(self) -> bool:
+        return self._value == "/.dockerenv"
+
+
+class _HostPath:
+    def __init__(self, value: object) -> None:
+        self._value = str(value)
+
+    def exists(self) -> bool:
+        return False
+
+
+def test_parser_loopback_rewrites_inside_docker_without_adding_v1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setattr("finance_context_agent.settings.Path", _DockerPath)
+    settings = Settings(_env_file=None)
+    assert settings.resolved_parser_base_url() == "http://host.docker.internal:8080"
+
+
+def test_parser_rewrite_keeps_port_path_query_and_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv(
+        "PARSER_BASE_URL",
+        "http://user:secret@localhost:9090/custom?x=1",
+    )
+    monkeypatch.setattr("finance_context_agent.settings.Path", _DockerPath)
+    settings = Settings(_env_file=None)
+    assert settings.resolved_parser_base_url() == (
+        "http://user:secret@host.docker.internal:9090/custom?x=1"
+    )
+
+
+def test_parser_url_unchanged_outside_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setattr("finance_context_agent.settings.Path", _HostPath)
+    settings = Settings(_env_file=None)
+    assert settings.resolved_parser_base_url() == "http://127.0.0.1:8080"
+
+
+def test_parser_non_loopback_unchanged_inside_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv("PARSER_BASE_URL", "http://parser:8080/root")
+    monkeypatch.setattr("finance_context_agent.settings.Path", _DockerPath)
+    settings = Settings(_env_file=None)
+    assert settings.resolved_parser_base_url() == "http://parser:8080/root"
+
+
+def test_empty_model_base_gains_v1() -> None:
+    assert normalize_base_url("http://127.0.0.1:1234") == "http://127.0.0.1:1234/v1"

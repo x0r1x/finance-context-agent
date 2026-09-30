@@ -55,6 +55,32 @@ def normalize_base_url(url: str, *, rewrite_loopback_to: str | None = None) -> s
     return urlunsplit((parts.scheme, netloc, path, parts.query, parts.fragment))
 
 
+def rewrite_loopback_host(url: str, *, rewrite_loopback_to: str | None = None) -> str:
+    """Replace a loopback host and leave the path alone.
+
+    Parser routes are joined onto the base, including ``/readyz``. An empty
+    path must stay empty. ``normalize_base_url`` is for the model base, where
+    an empty path means ``/v1``.
+    """
+    stripped = url.strip()
+    if not rewrite_loopback_to:
+        return stripped
+    parts = urlsplit(stripped)
+    if parts.hostname not in _LOOPBACK:
+        return stripped
+    userinfo = ""
+    if parts.username:
+        userinfo += parts.username
+        if parts.password is not None:
+            userinfo += f":{parts.password}"
+        userinfo += "@"
+    hostport = rewrite_loopback_to
+    if parts.port is not None:
+        hostport = f"{hostport}:{parts.port}"
+    netloc = f"{userinfo}{hostport}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -106,6 +132,10 @@ class Settings(BaseSettings):
     def resolved_llm_base_url(self) -> str:
         rewrite = "host.docker.internal" if Path("/.dockerenv").exists() else None
         return normalize_base_url(self.llm_base_url, rewrite_loopback_to=rewrite)
+
+    def resolved_parser_base_url(self) -> str:
+        rewrite = "host.docker.internal" if Path("/.dockerenv").exists() else None
+        return rewrite_loopback_host(self.parser_base_url, rewrite_loopback_to=rewrite)
 
     def saver_ttl(self) -> dict[str, Any]:
         return {
