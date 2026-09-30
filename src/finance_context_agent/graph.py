@@ -14,45 +14,7 @@ from finance_context_agent.periods import periods_named_in_question, resolve_per
 from finance_context_agent.prompts import answer_messages, critic_messages, plan_messages
 from finance_context_agent.settings import Settings
 
-_QUESTION_WORDS = frozenset(
-    {
-        "какой",
-        "какая",
-        "какое",
-        "какие",
-        "каков",
-        "какова",
-        "каковы",
-        "сколько",
-        "what",
-        "which",
-        "how",
-        "much",
-        "is",
-        "в",
-        "во",
-        "на",
-        "за",
-        "для",
-        "по",
-        "из",
-        "и",
-        "of",
-        "in",
-        "for",
-        "the",
-        "a",
-        "an",
-        "to",
-    }
-)
-_METRIC_ALIASES = {
-    "долг": "Debt",
-    "долга": "Debt",
-    "долгу": "Debt",
-    "долгом": "Debt",
-    "долги": "Debt",
-}
+_TOKEN_EDGE = "?.!,;:«»\"'()[]"
 
 
 class AgentState(TypedDict, total=False):
@@ -186,32 +148,18 @@ def build_graph(
             for period in axis.get("periods") or []
             if period.get("period_key")
         }
-        needles: list[str] = []
-        seen_needles: set[str] = set()
-        for raw in list(plan_body.get("needles") or []):
-            cleaned = _catalog_needle(str(raw), period_keys)
-            if not cleaned:
-                continue
-            folded = cleaned.casefold()
-            if folded in seen_needles:
-                continue
-            seen_needles.add(folded)
-            needles.append(cleaned)
-        if not needles:
-            return _miss(state, "Пустой поиск.", settings)
-        pages: list[tuple[str, dict[str, Any]]] = []
         try:
-            for needle in needles:
-                pages.append(
-                    (
-                        needle,
-                        await parser.search_rows(
-                            job_id, needle, limit=settings.catalog_search_limit
-                        ),
-                    )
-                )
+            pages = await _catalog_pages(
+                parser,
+                job_id,
+                list(plan_body.get("needles") or []),
+                period_keys,
+                settings.catalog_search_limit,
+            )
         except ParserError as exc:
             return _terminal_or_raise(exc)
+        if not pages:
+            return _miss(state, "Пустой поиск.", settings)
         if (plan_body.get("question_type") or "lookup") == "compose":
             return _compose(state, pages, settings)
         return _single(state, pages, settings)
@@ -671,19 +619,62 @@ def _actionable_critic_gaps(items: list[Any]) -> list[str]:
     return kept
 
 
-def _catalog_needle(needle: str, period_keys: set[str]) -> str:
-    """Drop question words and period keys. A Russian debt word searches as Debt."""
-    kept: list[str] = []
+def _phrase_tokens(needle: str, period_keys: set[str]) -> list[str]:
+    """Words of a catalog phrase. A period key of this book is not a label."""
+    tokens: list[str] = []
     for raw in needle.split():
-        token = raw.strip("?.!,;:«»\"'()[]")
+        token = raw.strip(_TOKEN_EDGE)
         folded = token.casefold()
-        if not folded or folded in _QUESTION_WORDS or folded in period_keys:
+        if len(folded) < 2 or folded in period_keys:
             continue
-        kept.append(token)
-    if not kept:
-        return ""
-    phrase = " ".join(kept)
-    return _METRIC_ALIASES.get(phrase.casefold(), phrase)
+        tokens.append(token)
+    return tokens
+
+
+async def _catalog_pages(
+    parser: ParserClient,
+    job_id: str,
+    needles: list[Any],
+    period_keys: set[str],
+    limit: int,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Search a phrase once. A total miss with several tokens searches each token."""
+    fetched: dict[str, tuple[str, dict[str, Any]]] = {}
+    pages: list[tuple[str, dict[str, Any]]] = []
+    added: set[str] = set()
+
+    async def fetch(query: str) -> tuple[str, dict[str, Any]]:
+        folded = query.casefold()
+        cached = fetched.get(folded)
+        if cached is not None:
+            return cached
+        page = await parser.search_rows(job_id, query, limit=limit)
+        fetched[folded] = (query, page)
+        return fetched[folded]
+
+    def add(item: tuple[str, dict[str, Any]]) -> None:
+        folded = item[0].casefold()
+        if folded in added:
+            return
+        added.add(folded)
+        pages.append(item)
+
+    for raw in needles:
+        tokens = _phrase_tokens(str(raw), period_keys)
+        if not tokens:
+            continue
+        phrase = " ".join(tokens)
+        phrase_item = await fetch(phrase)
+        if int(phrase_item[1].get("total") or 0) > 0 or len(tokens) == 1:
+            add(phrase_item)
+            continue
+        token_pages = [await fetch(token) for token in tokens]
+        if any(int(page.get("total") or 0) > 0 for _token, page in token_pages):
+            for item in token_pages:
+                add(item)
+            continue
+        add(phrase_item)
+    return pages
 
 
 def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:

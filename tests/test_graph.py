@@ -195,7 +195,10 @@ async def test_question_prefix_still_finds_the_named_period() -> None:
     graph = _graph(parser, model)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert [call["q"] for call in parser.catalog_calls] == ["EBITDA"]
+    queries = [call["q"] for call in parser.catalog_calls]
+    assert queries[0] == "Какой EBITDA"
+    assert "EBITDA" in queries
+    assert "Y1" not in queries
     assert parser.observation_calls[0]["period_ids"] == ["Y1"]
     assert not interrupts_of(snap)
     assert snap.values["satisfactory"] is True
@@ -204,20 +207,71 @@ async def test_question_prefix_still_finds_the_named_period() -> None:
 
 
 @pytest.mark.asyncio
-async def test_russian_debt_word_opens_the_debt_menu() -> None:
+async def test_russian_debt_word_is_not_rewritten_to_debt() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
     rows = [catalog_row(f"row-{index}", f"Debt {index}") for index in range(8)]
     parser.pages[("job-1", "debt")] = page(rows, total=26)
     model = ScriptedModel()
     model.push("plan", plan(["Какой долг"]))
+    model.push("plan", plan(["Какой долг"]))
     graph = _graph(parser, model)
     await _run(graph, "Какой долг?")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert [call["q"] for call in parser.catalog_calls] == ["Debt"]
+    queries = [call["q"] for call in parser.catalog_calls]
+    assert "Debt" not in queries
+    assert "Какой долг" in queries
+    assert "долг" in queries
     assert interrupts_of(snap)
-    assert "8 из 26" in snap.values["user_question"]
+    assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_period_key_leaves_one_catalog_query() -> None:
+    parser = FakeParser()
+    parser.axes = [{"id": "forecast", "periods": [{"period_key": "Y1"}]}]
+    row = catalog_row("P&L|13|P&L!r2", "EBITDA", concept="pnl.ebitda")
+    parser.pages[("job-1", "ebitda")] = page([row])
+    parser.observations[("job-1", "P&L|13|P&L!r2")] = [
+        observation("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit", label="EBITDA")
+    ]
+    model = ScriptedModel()
+    model.push("plan", plan(["EBITDA Y1"], []))
+    model.push(
+        "answer",
+        answer(
+            "EBITDA в Y1 равен 0.",
+            [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
+        ),
+    )
+    model.push("critic", {"gaps": []})
+    graph = _graph(parser, model)
+    await _run(graph, "EBITDA Y1")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert [call["q"] for call in parser.catalog_calls] == ["EBITDA"]
+    assert parser.observation_calls[0]["period_ids"] == ["Y1"]
+    assert snap.values["citations"][0]["value"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_a_hit_phrase_keeps_words_like_in() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.pages[("job-1", "cash in bank")] = page(
+        [catalog_row("row-cash", "Cash in Bank", concept="cash")]
+    )
+    parser.pages[("job-1", "cash")] = page([catalog_row("row-other", "Cash")], total=4)
+    parser.observations[("job-1", "row-cash")] = [
+        observation("row-cash", "Y1", "5", "C1", label="Cash in Bank")
+    ]
+    model = ScriptedModel()
+    model.push("plan", plan(["Cash in Bank"], [{"period_key": "Y1"}]))
+    model.push("answer", answer("5", [cite("row-cash", "Y1", "5", "C1")]))
+    model.push("critic", {"gaps": []})
+    graph = _graph(parser, model)
+    await _run(graph, "Cash in Bank")
+    assert [call["q"] for call in parser.catalog_calls] == ["Cash in Bank"]
 
 
 @pytest.mark.asyncio

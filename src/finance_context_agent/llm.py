@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from finance_context_agent.settings import field_default
 
@@ -38,75 +40,156 @@ def chat_completions_url(base_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
-_SCHEMAS: dict[str, dict[str, Any]] = {
-    "plan": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "question_type": {
-                "type": "string",
-                "enum": ["lookup", "compare", "explain", "compose"],
-            },
-            "needles": {
-                "type": "array",
-                "description": "Только подпись строки, без слова какой. Например EBITDA или Debt.",
-                "items": {"type": "string"},
-            },
-            "periods": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "period_key": {"type": "string"},
-                        "year": {"type": "string"},
-                        "phase_year": {"type": "integer"},
-                    },
-                },
-            },
-            "trace": {"type": "string", "enum": ["none", "precedents", "dependents"]},
-        },
-        "required": ["question_type", "needles", "periods", "trace"],
-    },
-    "answer": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "text": {"type": "string"},
-            "citations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "row_key": {"type": "string"},
-                        "period_id": {"type": "string"},
-                        "cell": {"type": "string"},
-                        "value": {"type": "string"},
-                        "value_status": {"type": "string"},
-                        "normalized_value": {"type": "string"},
-                    },
-                    "required": ["row_key", "period_id"],
-                },
-            },
-        },
-        "required": ["text", "citations"],
-    },
-    "critic": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"gaps": {"type": "array", "items": {"type": "string"}}},
-        "required": ["gaps"],
-    },
-}
+class QuestionType(StrEnum):
+    lookup = "lookup"
+    compare = "compare"
+    explain = "explain"
+    compose = "compose"
+
+
+class Trace(StrEnum):
+    none = "none"
+    precedents = "precedents"
+    dependents = "dependents"
+
+
+def _present_period_text(value: str) -> str:
+    """A required string still comes back as punctuation when the field is absent."""
+    text = value.strip()
+    if any(character.isalnum() for character in text):
+        return text
+    return ""
+
+
+class Period(BaseModel):
+    # A string, not an int: strict output would emit 0, and 0 vetoes the period.
+    model_config = ConfigDict(extra="forbid")
+    period_key: str = Field(
+        default="",
+        description="Ключ периода оси. Пустая строка, если поля нет.",
+    )
+    year: str = Field(default="", description="Календарный год. Пустая строка, если поля нет.")
+    phase_year: str = Field(
+        default="",
+        description="Номер года фазы строкой. Пустая строка, если поля нет.",
+    )
+
+    @model_validator(mode="after")
+    def blank_placeholders(self) -> Period:
+        period_key = _present_period_text(self.period_key)
+        year = _present_period_text(self.year)
+        phase_year = _present_period_text(self.phase_year)
+        if (period_key, year, phase_year) == (self.period_key, self.year, self.phase_year):
+            return self
+        return self.model_copy(
+            update={"period_key": period_key, "year": year, "phase_year": phase_year}
+        )
+
+
+class Plan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question_type: QuestionType
+    needles: list[str] = Field(description="подпись строки как в книге, без текста вопроса")
+    periods: list[Period]
+    trace: Trace
+
+    @model_validator(mode="after")
+    def drop_blank_periods(self) -> Plan:
+        filled = [
+            period
+            for period in self.periods
+            if period.period_key.strip() or period.year.strip() or period.phase_year.strip()
+        ]
+        if len(filled) == len(self.periods):
+            return self
+        return self.model_copy(update={"periods": filled})
+
+
+class Citation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    row_key: str
+    period_id: str
+    cell: str = ""
+    value: str = ""
+    value_status: str = ""
+    normalized_value: str = ""
+
+
+class Answer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    citations: list[Citation]
+
+
+class Critic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    gaps: list[str]
+
+
+_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer, "critic": Critic}
+_SCHEMA_DROP = {"title", "default", "$defs", "$schema", "$comment"}
 
 
 def response_format_for(role: str) -> dict[str, Any]:
     """OpenAI Chat Completions structured output for one graph role."""
     return {
         "type": "json_schema",
-        "json_schema": {"name": role, "strict": True, "schema": _SCHEMAS[role]},
+        "json_schema": {
+            "name": role,
+            "strict": True,
+            "schema": _strict_json_schema(_MODELS[role]),
+        },
     }
+
+
+def _strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Flat strict schema. Local grammars reject $ref, and every object property is required."""
+    raw = model.model_json_schema()
+    schema = _strict_node(raw, raw.get("$defs") or {}, ())
+    if not isinstance(schema, dict):
+        raise TypeError(schema)
+    return schema
+
+
+def _strict_node(node: Any, defs: dict[str, Any], stack: tuple[str, ...]) -> Any:
+    if isinstance(node, list):
+        return [_strict_node(item, defs, stack) for item in node]
+    if not isinstance(node, dict):
+        return node
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        name = ref.rsplit("/", 1)[-1]
+        if name in stack:
+            raise ValueError(name)
+        resolved = _strict_node(defs[name], defs, stack + (name,))
+        extras = {key: value for key, value in node.items() if key != "$ref"}
+        if extras and isinstance(resolved, dict):
+            overlay = _strict_node(extras, defs, stack)
+            if isinstance(overlay, dict):
+                return {**resolved, **overlay}
+        return resolved
+    cleaned: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _SCHEMA_DROP:
+            continue
+        cleaned[key] = _strict_node(value, defs, stack)
+    if isinstance(cleaned.get("allOf"), list) and len(cleaned["allOf"]) == 1:
+        only = cleaned["allOf"][0]
+        if isinstance(only, dict):
+            merged = dict(only)
+            for key, value in cleaned.items():
+                if key != "allOf":
+                    merged[key] = value
+            cleaned = merged
+    properties = cleaned.get("properties")
+    if cleaned.get("type") == "object" or isinstance(properties, dict):
+        if not isinstance(properties, dict):
+            properties = {}
+        cleaned["type"] = "object"
+        cleaned["properties"] = properties
+        cleaned["additionalProperties"] = False
+        cleaned["required"] = list(properties)
+    return cleaned
 
 
 class OpenAIChat:
@@ -133,6 +216,7 @@ class OpenAIChat:
             await self._client.aclose()
 
     async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
+        model = _MODELS[role]
         payload = {
             "model": self._model,
             "temperature": self._temperature,
@@ -161,7 +245,12 @@ class OpenAIChat:
                 last = content[:200]
                 continue
             if isinstance(parsed, dict):
-                return parsed
+                try:
+                    checked = model.model_validate(parsed)
+                except ValidationError:
+                    last = "invalid"
+                    continue
+                return checked.model_dump(mode="json")
             last = "not-object"
         raise SchemaError(last)
 
