@@ -126,10 +126,18 @@ def _scale(
             citation.get("value"), observation.get("value")
         ):
             continue
+        if _explicit_zero(citation, observation):
+            continue
         scale = ((observation.get("unit") or {}).get("scale") or "").casefold()
         words = _SCALE_WORDS.get(scale, (scale,) if scale else ())
         if words and not _has_scale(text, words):
             gaps.append(f"scale:{observation.get('row_key')}")
+
+
+def _explicit_zero(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
+    """A stored zero does not need a scale word. The magnitude is still zero."""
+    status = citation.get("value_status") or observation.get("value_status")
+    return status == "zero_explicit" and str(citation.get("value")).strip() == "0"
 
 
 def _has_scale(text: str, words: tuple[str, ...]) -> bool:
@@ -160,7 +168,8 @@ def _has_precedent(matched: list[tuple[dict[str, Any], dict[str, Any]]]) -> bool
 
 
 def _wants_precedent(question: str, question_type: str, trace: str) -> bool:
-    if question_type == "explain" or trace == "precedents":
+    del question_type
+    if trace == "precedents":
         return True
     folded = question.casefold()
     return any(phrase in folded for phrase in _WHY)

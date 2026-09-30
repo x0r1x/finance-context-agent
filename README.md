@@ -56,7 +56,7 @@ A row the parser left without a concept is still found by its label. Its `concep
 | `CONTENT_BUDGET` | `4` | Content steps before a new gap closes the turn, at least 1 |
 | `CLARIFY_BUDGET` | `2` | Clarification replies before the turn closes, at least 1 |
 | `OBSERVATION_CAP` | `48` | Observations kept for one answer, from 1 to 48 |
-| `CATALOG_SEARCH_LIMIT` | `8` | Catalog hits requested per needle, from 1 to 100 |
+| `CATALOG_SEARCH_LIMIT` | `32` | Catalog hits requested per needle, from 1 to 100 |
 | `PRECEDENT_DEPTH` | `2` | Precedent and dependent graph depth, from 0 to 3 |
 | `MAX_NEEDLES` | `4` | Search phrases taken from one plan, from 1 to 4 |
 | `MAX_DEPENDENT_ROWS` | `4` | Dependent rows for an influence question, from 1 to 8 |

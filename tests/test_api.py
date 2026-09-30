@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from uuid import UUID
 
 import pytest
@@ -275,6 +276,23 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
     assert continued.json()["satisfactory"] is True
     snap = await graph.aget_state(run_config(THREAD))
     assert snap.values["question"] == "Какой DSCR в 2030?"
+
+
+@pytest.mark.asyncio
+async def test_model_error_is_logged_and_hidden(caplog: pytest.LogCaptureFixture) -> None:
+    parser = FakeParser()
+    _ready(parser)
+    model = ScriptedModel()
+    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
+    model.push("answer", "boom")
+    app, _graph = _app(parser, model)
+    with caplog.at_level(logging.WARNING, logger="finance_context_agent.api"):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
+            failed = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
+    assert failed.status_code == 503
+    assert failed.json() == {"error": "upstream_unavailable"}
+    assert "boom" in caplog.text
+    assert "boom" not in failed.text
 
 
 @pytest.mark.asyncio

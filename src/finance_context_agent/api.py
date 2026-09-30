@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,7 @@ from finance_context_agent.session import (
 from finance_context_agent.turn import run_config
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
 _JOB_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -132,7 +134,8 @@ async def _run(request: Request, *, thread_id: str, job_id: str | None, text: st
         except GraphInterrupt:
             pass
         snapshot = await graph.aget_state(config)
-    except (ModelError, ParserError, httpx.HTTPError, RedisError, GraphRecursionError):
+    except (ModelError, ParserError, httpx.HTTPError, RedisError, GraphRecursionError) as exc:
+        logger.warning("upstream failed", exc_info=exc)
         return error(503, "upstream_unavailable")
     finally:
         await lock.release(thread_id, token)

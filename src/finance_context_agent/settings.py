@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     content_budget: int = Field(default=4, ge=1)
     clarify_budget: int = Field(default=2, ge=1)
     observation_cap: int = Field(default=48, ge=1, le=48)
-    catalog_search_limit: int = Field(default=8, ge=1, le=100)
+    catalog_search_limit: int = Field(default=32, ge=1, le=100)
     precedent_depth: int = Field(default=2, ge=0, le=3)
     max_needles: int = Field(default=4, ge=1, le=4)
     max_dependent_rows: int = Field(default=4, ge=1, le=8)
