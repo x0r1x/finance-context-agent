@@ -39,12 +39,30 @@ A row the parser left without a concept is still found by its label. Its `concep
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PARSER_BASE_URL` | `http://127.0.0.1:8080` | Parser |
+| `PARSER_TIMEOUT_SEC` | `15` | Parser HTTP timeout, seconds. Greater than 0 |
 | `LLM_BASE_URL` | `http://127.0.0.1:1234/v1` | Model. Inside the container a loopback host is rewritten to `host.docker.internal` |
 | `LLM_API_KEY` | empty | Sent as `Authorization: Bearer …` when set |
 | `LLM_MODEL` | `local` | Model name sent to the LLM server |
+| `LLM_TIMEOUT_SEC` | `60` | Model HTTP timeout, seconds. Greater than 0 |
+| `LLM_TEMPERATURE` | `0` | Sampling temperature, from 0 to 2 |
 | `REDIS_URL` | `redis://localhost:6379/0` | Dialog checkpoints. Compose uses `redis://:devpassword@redis:6379/0` |
 | `HOST` | `0.0.0.0` | Bind address of the process |
 | `PORT` | `8090` | Bind port of the process |
+| `CHECKPOINT_TTL_MINUTES` | `1440` | Idle lifetime of a checkpoint, at least 1 minute |
+| `CHECKPOINT_REFRESH_ON_READ` | `true` | Reading a thread resets that lifetime |
+| `LOCK_TTL_SEC` | `900` | How long a dead run holds a thread, at least 1 second |
+| `RECURSION_LIMIT` | `40` | LangGraph step cap for one invoke, at least 1 |
+| `CONTENT_BUDGET` | `4` | Content steps before a new gap closes the turn, at least 1 |
+| `CLARIFY_BUDGET` | `2` | Clarification replies before the turn closes, at least 1 |
+| `OBSERVATION_CAP` | `48` | Observations kept for one answer, from 1 to 48 |
+| `CATALOG_SEARCH_LIMIT` | `8` | Catalog hits requested per needle, from 1 to 100 |
+| `PRECEDENT_DEPTH` | `2` | Precedent and dependent graph depth, from 0 to 3 |
+| `MAX_NEEDLES` | `4` | Search phrases taken from one plan, from 1 to 4 |
+| `MAX_DEPENDENT_ROWS` | `4` | Dependent rows for an influence question, from 1 to 8 |
+| `DEPENDENT_OBSERVATION_LIMIT` | `8` | Observations requested per dependent row, from 1 to 48 |
+| `LANGGRAPH_STRICT_MSGPACK` | `true` | Strict checkpoint serialization |
+
+Copy `.env.example` to `.env` to override a default. `uv run` reads that file. A blank value keeps the default. A number outside the range in the table stops the process at startup. The process environment wins over `.env`. Compose does not load the host `.env` into the container; set overrides in the compose `environment` block.
 
 The public `model` field of a completion is always `finance-context-agent`. `LLM_MODEL` is only the name sent upstream.
 
@@ -78,7 +96,7 @@ Parser and LM Studio stay on the host. Compose runs the agent and Redis.
 docker compose up --build
 ```
 
-The API is published on `127.0.0.1:8090`. Redis is on the compose network only; port 6379 is not published. The compose password `devpassword` is for this local file. The model server must listen on the host gateway, because the container calls `host.docker.internal`.
+The API is published on `127.0.0.1:8090`. The process binds `PORT` (default 8090); change the compose port mapping together with `PORT`. Redis is on the compose network only; port 6379 is not published. The compose password `devpassword` is for this local file. The model server must listen on the host gateway, because the container calls `host.docker.internal`.
 
 ## Ask a question
 
@@ -144,7 +162,7 @@ Several catalog rows, or a period that maps to more than one axis key, produce a
 «DSCR»: 2. DSCR observed [Debt, dscr]; DSCR covenant [Debt, dscr_covenant]
 ```
 
-Reply with the label you want, on the same `thread_id`. Two replies is the cap. The same question asked again closes the turn with `satisfactory: false`.
+Reply with the label you want, on the same `thread_id`. Two replies is the cap (`CLARIFY_BUDGET`). The same question asked again closes the turn with `satisfactory: false`.
 
 Other pauses, in the words the agent sends:
 
@@ -180,7 +198,7 @@ An error body is always `{"error": "<code>"}`.
 
 The last message must be `user`. `content` is a string, or a list of parts whose `text` fields are joined.
 
-A book that is still building is a normal 200. The assistant text is `Книга ещё собирается.` and `satisfactory` is false. An unknown job id is `Книга не найдена.`, also 200. There is no succeeded book to choose from: `Готовых книг нет.` A network error, a timeout, or an HTTP 5xx from the parser or the model is 503 `upstream_unavailable`. The parser client waits 15 seconds. The model client waits 60 seconds.
+A book that is still building is a normal 200. The assistant text is `Книга ещё собирается.` and `satisfactory` is false. An unknown job id is `Книга не найдена.`, also 200. There is no succeeded book to choose from: `Готовых книг нет.` A network error, a timeout, or an HTTP 5xx from the parser or the model is 503 `upstream_unavailable`. The parser client waits 15 seconds (`PARSER_TIMEOUT_SEC`). The model client waits 60 seconds (`LLM_TIMEOUT_SEC`).
 
 `gaps` names what failed. Examples: `report_not_ready`, `not_found`, `number:…`, `cell:…`, `scale:…`, `precedent`, `compare_sides`, `schema`, `clarify`. A citation carries `row_key`, `period_id`, `cell`, and when present `value` and `value_status` (`cached`, `empty`, `zero_explicit`, `not_applicable`). `steps` records the search and the observation calls of the turn.
 
@@ -190,15 +208,15 @@ A book that is still building is a normal 200. The assistant text is `Книга
 
 The citation check requires every number in the assistant text to equal a citation `value` or `normalized_value`, or to match that citation's `period_id`. The cell is one of the observations just retrieved. A scale other than 1 has to be named in the answer. A comparison names both sides. A question that asks why, or what a figure is made of (`почему`, `из чего`, `why`), includes at least one precedent. An empty or `not_applicable` citation passes with `value_status` and no number. A number the slice does not confirm is replaced with `Подтверждённого числа в срезе нет.` and the gap ids are appended.
 
-A critic then names any remaining gap. A new gap sends the agent back for another slice, up to four content steps. The same gap, the same clarification question, a plan the model cannot express as JSON, or a spent budget closes the turn with `satisfactory: false`. The agent does not ask whether the user is satisfied.
+A critic then names any remaining gap. A new gap sends the agent back for another slice, up to four content steps (`CONTENT_BUDGET`). The same gap, the same clarification question, a plan the model cannot express as JSON, or a spent budget closes the turn with `satisfactory: false`. The agent does not ask whether the user is satisfied.
 
-A series cut at 48 observations is not averaged. The agent asks for a period. A question about what a row affects also retrieves dependent rows, inside the same cap of 48 observations.
+A series cut at 48 observations (`OBSERVATION_CAP`) is not averaged. The agent asks for a period. A question about what a row affects also retrieves dependent rows, inside the same cap of 48 observations.
 
 ## Sessions
 
-One `thread_id` is one dialog. Threads do not share citations or the chosen book. Every agent replica reads the same Redis, so another process can continue a dialog. A checkpoint lives for 24 hours of idle time and the timer resets when the thread is read. Memory does not cross threads.
+One `thread_id` is one dialog. Threads do not share citations or the chosen book. Every agent replica reads the same Redis, so another process can continue a dialog. A checkpoint lives for 24 hours of idle time (`CHECKPOINT_TTL_MINUTES`) and the timer resets when the thread is read (`CHECKPOINT_REFRESH_ON_READ`). Memory does not cross threads.
 
-One run at a time holds a thread. A second request receives 409 `thread_busy` and does not cancel the first. A run that dies releases the thread within 15 minutes.
+One run at a time holds a thread. A second request receives 409 `thread_busy` and does not cancel the first. A run that dies releases the thread within 15 minutes (`LOCK_TTL_SEC`).
 
 ## Checks
 

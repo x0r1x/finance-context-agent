@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-LLM_TIMEOUT = httpx.Timeout(60.0)
+from finance_context_agent.settings import field_default
 
 
 class SchemaError(Exception):
@@ -39,13 +39,17 @@ class OpenAIChat:
         base_url: str,
         api_key: str,
         model: str,
-        timeout: httpx.Timeout = LLM_TIMEOUT,
+        timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
+        *,
+        temperature: float | None = None,
     ) -> None:
         self._url = chat_completions_url(base_url)
         self._model = model
+        self._temperature = field_default("llm_temperature") if temperature is None else temperature
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        seconds = field_default("llm_timeout_sec") if timeout is None else timeout
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(float(seconds)))
         self._owns_client = client is None
 
     async def aclose(self) -> None:
@@ -55,7 +59,7 @@ class OpenAIChat:
     async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
         payload = {
             "model": self._model,
-            "temperature": 0,
+            "temperature": self._temperature,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

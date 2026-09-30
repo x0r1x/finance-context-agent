@@ -119,7 +119,7 @@ async def _run(request: Request, *, thread_id: str, job_id: str | None, text: st
     token = await lock.acquire(thread_id)
     if token is None:
         return error(409, "thread_busy")
-    config = run_config(thread_id)
+    config = run_config(thread_id, request.app.state.settings)
     graph = request.app.state.graph
     try:
         snapshot = await graph.aget_state(config)

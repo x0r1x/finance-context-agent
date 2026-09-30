@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import redis.asyncio as aioredis
 
-LOCK_TTL_SECONDS = 900
+from finance_context_agent.settings import field_default
 
 _RELEASE = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -35,12 +35,13 @@ class MemoryThreadLock:
 
 
 class RedisThreadLock:
-    def __init__(self, client: aioredis.Redis) -> None:
+    def __init__(self, client: aioredis.Redis, *, ttl_seconds: int | None = None) -> None:
         self._redis = client
+        self._ttl = int(field_default("lock_ttl_sec") if ttl_seconds is None else ttl_seconds)
 
     async def acquire(self, thread_id: str) -> str | None:
         token = uuid4().hex
-        ok = await self._redis.set(self._key(thread_id), token, nx=True, ex=LOCK_TTL_SECONDS)
+        ok = await self._redis.set(self._key(thread_id), token, nx=True, ex=self._ttl)
         if not ok:
             return None
         return token

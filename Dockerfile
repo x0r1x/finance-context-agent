@@ -34,6 +34,6 @@ ENV LANGGRAPH_STRICT_MSGPACK=true
 EXPOSE 8090
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"
+    CMD python -c "import os,urllib.request; port=os.environ.get('PORT') or '8090'; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % port)"
 
-CMD ["uvicorn", "finance_context_agent.app:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["finance-context-agent"]

@@ -17,24 +17,26 @@ from finance_context_agent.lock import RedisThreadLock
 from finance_context_agent.parser import ParserClient
 from finance_context_agent.settings import Settings
 
-SAVER_TTL = {"default_ttl": 1440, "refresh_on_read": True}
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    parser = ParserClient(settings.parser_base_url)
+    parser = ParserClient(settings.parser_base_url, timeout=settings.parser_timeout_sec)
     model = OpenAIChat(
         settings.resolved_llm_base_url(),
         settings.llm_api_key,
         settings.llm_model,
+        timeout=settings.llm_timeout_sec,
+        temperature=settings.llm_temperature,
     )
     redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    async with AsyncRedisSaver.from_conn_string(settings.redis_url, ttl=SAVER_TTL) as checkpointer:
+    async with AsyncRedisSaver.from_conn_string(
+        settings.redis_url, ttl=settings.saver_ttl()
+    ) as checkpointer:
         await checkpointer.asetup()
-        app.state.graph = build_graph(parser, model, checkpointer)
+        app.state.graph = build_graph(parser, model, checkpointer, settings)
         app.state.redis = redis
-        app.state.lock = RedisThreadLock(redis)
+        app.state.lock = RedisThreadLock(redis, ttl_seconds=settings.lock_ttl_sec)
         app.state.parser = parser
         app.state.model = model
         try:
