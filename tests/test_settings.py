@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from finance_context_agent.settings import Settings, field_default
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+_MSGPACK_PROBE = (
+    "import finance_context_agent.app\n"
+    "from langgraph.checkpoint.serde._msgpack import STRICT_MSGPACK_ENABLED\n"
+    "print(int(STRICT_MSGPACK_ENABLED))\n"
+)
 
 _KEYS = (
     "REDIS_URL",
@@ -102,3 +112,30 @@ def test_out_of_range_stops_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OBSERVATION_CAP", "49")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def _probe_msgpack(cwd: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("LANGGRAPH_STRICT_MSGPACK", None)
+    env["PYTHONPATH"] = os.pathsep.join((str(_SRC), env.get("PYTHONPATH", ""))).rstrip(os.pathsep)
+    return subprocess.run(
+        [sys.executable, "-c", _MSGPACK_PROBE],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_default_msgpack_flag_is_on_when_langgraph_imports(tmp_path: Path) -> None:
+    result = _probe_msgpack(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "1"
+
+
+def test_dotenv_msgpack_flag_reaches_langgraph(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("LANGGRAPH_STRICT_MSGPACK=false\n")
+    result = _probe_msgpack(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0"
