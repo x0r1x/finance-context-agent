@@ -21,7 +21,7 @@ from finance_context_agent.settings import Settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    parser = ParserClient(settings.parser_base_url, timeout=settings.parser_timeout_sec)
+    parser = ParserClient(settings.resolved_parser_base_url(), timeout=settings.parser_timeout_sec)
     model = OpenAIChat(
         settings.resolved_llm_base_url(),
         settings.llm_api_key,
