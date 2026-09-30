@@ -20,6 +20,7 @@ The questions the agent asks the user are in Russian, because the prompts are Ru
 - [When an answer is accepted](#when-an-answer-is-accepted)
 - [Sessions](#sessions)
 - [Checks](#checks)
+- [Live check](#live-check)
 
 ## Where the workbook comes from
 
@@ -226,3 +227,28 @@ uv run pytest
 ```
 
 The suite fakes the parser and the model. `tests/test_redis_checkpoint.py` starts Redis 8 in Docker, pauses a dialog, and resumes it on a new graph pointed at the same Redis. It is skipped when Docker is not installed.
+
+### Live check
+
+Redis, the parser, and LM Studio are already running, and the agent is already listening. `scripts/run.sh` sends HTTP only. The workbook stays on the parser. A question goes out only when `JOB_ID` is set.
+
+```bash
+bash scripts/run.sh
+JOB_ID=<parser job_id> bash scripts/run.sh 'Какой DSCR в 2030?'
+THREAD_ID=<thread_id from summary.txt> JOB_ID=<parser job_id> bash scripts/ask.sh 'Наблюдённый'
+```
+
+`bash scripts/run.sh` checks `GET /healthz`, `GET /readyz` (Redis and the parser both answer), and the 400 responses that return before the model: `stream_unsupported`, `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id`, and `bad_job_id` from the body and from `X-Job-Id`.
+
+A question writes `completion.json`. The check requires HTTP 200, `object` `chat.completion`, `model` `finance-context-agent`, and `finish_reason` `stop`. `awaiting_user: true` is a successful check. The assistant text is the pause, and `satisfactory` stays with the book and the model. The third command sends the next user message on that `thread_id`. The server decides whether that resumes the pause or starts a new turn.
+
+The run directory is `out/<timestamp>/`:
+
+```text
+healthz.json  readyz.json  summary.txt
+error-stream.json  error-messages.json  error-role.json  error-empty.json
+error-thread.json  error-job.json  error-header-job.json
+ask.json  completion.json
+```
+
+Each error response sits next to the request that produced it (`*.request.json`). `ask.json` and `completion.json` are written only when `JOB_ID` is set. Override `BASE_URL` (default `http://127.0.0.1:8090`), `OUT_DIR` (default `./out`), `RUN_DIR`, `THREAD_ID`, `QUESTION`, and `CHAT_TIMEOUT_SEC` (default 180, one POST). A client timeout leaves the turn running. The thread stays locked until `LOCK_TTL_SEC` (default 900).
