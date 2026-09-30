@@ -1,0 +1,56 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      REDIS_URL: redis://:devpassword@redis:6379/0
+      PARSER_BASE_URL: http://host.docker.internal:8080
+      LLM_BASE_URL: http://host.docker.internal:1234/v1
+      LLM_API_KEY: ""
+      LLM_MODEL: local
+      LANGGRAPH_STRICT_MSGPACK: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  redis:
+    image: redis:8
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - devpassword
+      - --maxmemory
+      - 1gb
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      REDISCLI_AUTH: devpassword
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  redis-data:
