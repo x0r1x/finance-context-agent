@@ -20,6 +20,7 @@
 - [Когда ответ принят](#когда-ответ-принят)
 - [Сессии](#сессии)
 - [Проверка](#проверка)
+- [Живая проверка](#живая-проверка)
 
 ## Откуда берётся книга
 
@@ -226,3 +227,28 @@ uv run pytest
 ```
 
 Набор подставляет парсер и модель. `tests/test_redis_checkpoint.py` поднимает Redis 8 в Docker, ставит диалог на паузу и продолжает его новым графом на том же Redis. Тест пропускается, если Docker не установлен.
+
+### Живая проверка
+
+Redis, парсер и LM Studio уже запущены, агент уже слушает порт. `scripts/run.sh` только шлёт HTTP. Книга остаётся на парсере. Вопрос уходит, только если задан `JOB_ID`.
+
+```bash
+bash scripts/run.sh
+JOB_ID=<job_id парсера> bash scripts/run.sh 'Какой DSCR в 2030?'
+THREAD_ID=<thread_id из summary.txt> JOB_ID=<job_id парсера> bash scripts/ask.sh 'Наблюдённый'
+```
+
+`bash scripts/run.sh` проверяет `GET /healthz`, `GET /readyz` (отвечают и Redis, и парсер) и ответы 400, которые возвращаются до модели: `stream_unsupported`, `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id` и `bad_job_id` из тела и из `X-Job-Id`.
+
+Вопрос пишет `completion.json`. Проверка требует HTTP 200, `object` `chat.completion`, `model` `finance-context-agent` и `finish_reason` `stop`. `awaiting_user: true` — успешная проверка. Текст ассистента — это пауза, а `satisfactory` остаётся за книгой и моделью. Третья команда шлёт следующее сообщение пользователя на этот `thread_id`. Сервер сам решает, продолжение это паузы или новый ход.
+
+Каталог прогона — `out/<timestamp>/`:
+
+```text
+healthz.json  readyz.json  summary.txt
+error-stream.json  error-messages.json  error-role.json  error-empty.json
+error-thread.json  error-job.json  error-header-job.json
+ask.json  completion.json
+```
+
+Рядом с каждым ответом об ошибке лежит запрос, который его породил (`*.request.json`). `ask.json` и `completion.json` пишутся, только если задан `JOB_ID`. Можно переопределить `BASE_URL` (по умолчанию `http://127.0.0.1:8090`), `OUT_DIR` (по умолчанию `./out`), `RUN_DIR`, `THREAD_ID`, `QUESTION` и `CHAT_TIMEOUT_SEC` (по умолчанию 180, один POST). Таймаут клиента не останавливает ход. Тред остаётся занят до `LOCK_TTL_SEC` (по умолчанию 900).
