@@ -106,7 +106,6 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
         observation("row-obs", "2030", "1.25", "C10", label="DSCR наблюдённый")
     ]
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
     config = run_config("thread-redis")
     ttl = Settings(_env_file=None).saver_ttl()
 

@@ -180,7 +180,6 @@ async def test_two_dscr_rows_resume_through_the_route() -> None:
         observation("row-obs", "2030", "1.25", "C10", label="DSCR наблюдённый")
     ]
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         first = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
@@ -243,7 +242,7 @@ async def test_thread_busy_while_the_lock_is_held() -> None:
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         first = asyncio.create_task(
-            client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
+            client.post("/v1/chat/completions", json=_payload("Какой?"))
         )
         await model.entered.wait()
         second = await client.post("/v1/chat/completions", json=_payload("ещё"))
@@ -268,14 +267,14 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
     model.push("critic", {"gaps": []})
     app, graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-        failed = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
+        failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
         assert failed.status_code == 503
         assert failed.json()["error"] == "upstream_unavailable"
         continued = await client.post("/v1/chat/completions", json=_payload("другой вопрос"))
     assert continued.status_code == 200
     assert continued.json()["satisfactory"] is True
     snap = await graph.aget_state(run_config(THREAD))
-    assert snap.values["question"] == "Какой DSCR в 2030?"
+    assert snap.values["question"] == "Какой?"
 
 
 @pytest.mark.asyncio
@@ -288,7 +287,7 @@ async def test_model_error_is_logged_and_hidden(caplog: pytest.LogCaptureFixture
     app, _graph = _app(parser, model)
     with caplog.at_level(logging.WARNING, logger="finance_context_agent.api"):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-            failed = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
+            failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
     assert failed.status_code == 503
     assert failed.json() == {"error": "upstream_unavailable"}
     assert "boom" in caplog.text

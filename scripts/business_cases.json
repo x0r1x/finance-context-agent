@@ -1,0 +1,367 @@
+{
+  "skipped": [
+    {
+      "file": "АШАН_модель CF.xls",
+      "reason": "Парсер читает только .xlsx и .xlsm, готовой задачи в стеке нет."
+    }
+  ],
+  "cases": [
+    {
+      "id": "packt-ebitda-y1",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой EBITDA в Y1?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y1",
+        "value_status": "zero_explicit",
+        "forbid_periods": ["Y10"]
+      }
+    },
+    {
+      "id": "packt-ebitda-y5",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой EBITDA в Y5?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y5",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-ebitda-y10",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой EBITDA в Y10?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y10",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-ebitda-y40",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой EBITDA в Y40?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y40",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-cfads-y5",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой CFADS в Y5?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "CFS|14|CFS!r3",
+        "period_id": "Y5",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-net-profit-y5",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой Net Profit в Y5?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|25|P&L!r2",
+        "period_id": "Y5",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-principal-y5",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой Principal Repayment в Y5?",
+      "expect": {
+        "outcome": "citation_or_ask",
+        "allowed": [
+          {
+            "row_key": "Debt|10|Debt!r3",
+            "period_id": "Y5",
+            "value_status": "cached"
+          }
+        ]
+      }
+    },
+    {
+      "id": "packt-debt-service-y1",
+      "book": "packt-project-finance.xlsx",
+      "group": "point",
+      "question": "Какой Debt service в Y1?",
+      "expect": {
+        "outcome": "citation_or_ask",
+        "allowed": [
+          {
+            "row_key": "Debt|17|Debt!r3",
+            "period_id": "Y1",
+            "value_status": "zero_explicit"
+          }
+        ]
+      }
+    },
+    {
+      "id": "packt-ebitda-y5-y10",
+      "book": "packt-project-finance.xlsx",
+      "group": "compare",
+      "question": "Сравни EBITDA в Y5 и в Y10.",
+      "expect": {
+        "outcome": "citations",
+        "pairs": [
+          {
+            "row_key": "P&L|13|P&L!r2",
+            "period_id": "Y5",
+            "value_status": "cached"
+          },
+          {
+            "row_key": "P&L|13|P&L!r2",
+            "period_id": "Y10",
+            "value_status": "cached"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rvi-ebitda-2026-2030",
+      "book": "rvi-project-finance.xlsx",
+      "group": "compare",
+      "question": "Сравни Operating Income or Loss (EBITDA) в 2026 и в 2030.",
+      "expect": {
+        "outcome": "citations",
+        "pairs": [
+          {
+            "row_key": "PF Model|262|PF Model!r185",
+            "period_id": "2026",
+            "value_status": "cached"
+          },
+          {
+            "row_key": "PF Model|262|PF Model!r185",
+            "period_id": "2030",
+            "value_status": "cached"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rvi-ebitda-2024",
+      "book": "rvi-project-finance.xlsx",
+      "group": "calendar",
+      "question": "Какой Operating Income or Loss (EBITDA) в 2024?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2024",
+        "value_status": "zero_explicit"
+      }
+    },
+    {
+      "id": "rvi-ebitda-2026",
+      "book": "rvi-project-finance.xlsx",
+      "group": "calendar",
+      "question": "Какой Operating Income or Loss (EBITDA) в 2026?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2026",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-ebitda-2030",
+      "book": "rvi-project-finance.xlsx",
+      "group": "calendar",
+      "question": "Какой Operating Income or Loss (EBITDA) в 2030?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2030",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-ebitda-2037",
+      "book": "rvi-project-finance.xlsx",
+      "group": "calendar",
+      "question": "Какой Operating Income or Loss (EBITDA) в 2037?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2037",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-ebitda-2062",
+      "book": "rvi-project-finance.xlsx",
+      "group": "calendar",
+      "question": "Какой Operating Income or Loss (EBITDA) в 2062?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2062"
+      }
+    },
+    {
+      "id": "rvi-avg-dscr",
+      "book": "rvi-project-finance.xlsx",
+      "group": "scalar",
+      "question": "Какой Average Debt Service Coverage Ratio (DSCR)?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|53|PF Model!r49",
+        "period_id": "",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-avg-dscr-2030",
+      "book": "rvi-project-finance.xlsx",
+      "group": "scalar",
+      "question": "Какой Average Debt Service Coverage Ratio (DSCR) в 2030?",
+      "expect": {
+        "outcome": "refuse"
+      }
+    },
+    {
+      "id": "rvi-min-dscr",
+      "book": "rvi-project-finance.xlsx",
+      "group": "scalar",
+      "question": "Какой Minimum Debt Service Coverage Ratio (DSCR)?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|54|PF Model!r49",
+        "period_id": "",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-irr",
+      "book": "rvi-project-finance.xlsx",
+      "group": "scalar",
+      "question": "Какой Internal Rate of Return (IRR)?",
+      "expect": {
+        "outcome": "citation_or_ask",
+        "allowed": [
+          {
+            "row_key": "PF Model|51|PF Model!r49",
+            "period_id": "",
+            "value_status": "cached"
+          }
+        ]
+      }
+    },
+    {
+      "id": "packt-dscr",
+      "book": "packt-project-finance.xlsx",
+      "group": "menu",
+      "question": "Какой DSCR?",
+      "expect": {
+        "outcome": "ask"
+      }
+    },
+    {
+      "id": "packt-ebitda-2030",
+      "book": "packt-project-finance.xlsx",
+      "group": "menu",
+      "question": "Какой EBITDA в 2030?",
+      "expect": {
+        "outcome": "refuse",
+        "forbid_periods": ["Y1", "Y5", "Y10", "Y40"]
+      }
+    },
+    {
+      "id": "packt-gross-revenues-y5",
+      "book": "packt-project-finance.xlsx",
+      "group": "menu",
+      "question": "Какой Gross revenues в Y5?",
+      "expect": {
+        "outcome": "any_row_or_ask",
+        "period_id": "Y5",
+        "label_contains": "Gross"
+      }
+    },
+    {
+      "id": "rvi-ebitda-menu-2030",
+      "book": "rvi-project-finance.xlsx",
+      "group": "menu",
+      "question": "Какой EBITDA в 2030?",
+      "expect": {
+        "outcome": "ask",
+        "menu_contains": [
+          "Operating Income or Loss (EBITDA)",
+          "EBITDA [PF Model"
+        ]
+      }
+    },
+    {
+      "id": "rvi-cfads-2030",
+      "book": "rvi-project-finance.xlsx",
+      "group": "menu",
+      "question": "Какой CFADS в 2030?",
+      "expect": {
+        "outcome": "any_row_or_ask",
+        "period_id": "2030",
+        "label_contains": "CFADS"
+      }
+    },
+    {
+      "id": "packt-ebitda-first-operation",
+      "book": "packt-project-finance.xlsx",
+      "group": "phase",
+      "question": "Какой EBITDA в первый операционный год?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y5",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "rvi-ebitda-first-operation",
+      "book": "rvi-project-finance.xlsx",
+      "group": "phase",
+      "question": "Какой Operating Income or Loss (EBITDA) в первый операционный год?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2026",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-debt-service-repayment-start",
+      "book": "packt-project-finance.xlsx",
+      "group": "phase",
+      "question": "Какой Debt service в год начала погашения?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "Debt|17|Debt!r3",
+        "period_id": "Y5",
+        "value_status": "cached"
+      }
+    },
+    {
+      "id": "packt-ebitda-y1-why",
+      "book": "packt-project-finance.xlsx",
+      "group": "composition",
+      "question": "Почему EBITDA в Y1 равен 0?",
+      "expect": {
+        "outcome": "citation",
+        "row_key": "P&L|13|P&L!r2",
+        "period_id": "Y1",
+        "value_status": "zero_explicit"
+      }
+    }
+  ]
+}
