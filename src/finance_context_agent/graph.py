@@ -775,26 +775,12 @@ def _question_plan(
 
 
 def narrow_hits(mention: str, page: dict[str, Any]) -> list[dict[str, Any]]:
-    """Exact label beats a longer label only when the concept differs."""
-    folded = mention.casefold().strip()
+    """Keep rows whose own label contains the needle. Concept and path are not read."""
+    folded = mention.strip().casefold()
     rows = list(page.get("rows") or [])
     if not folded:
         return rows
-    exact = [row for row in rows if str(row.get("label") or "").casefold() == folded]
-    if not exact:
-        return rows
-    concepts = {row.get("concept_id") for row in exact if row.get("concept_id")}
-    longer = []
-    for row in rows:
-        if row in exact:
-            continue
-        label = str(row.get("label") or "").casefold()
-        if folded not in label:
-            continue
-        concept = row.get("concept_id")
-        if concept and concept in concepts:
-            longer.append(row)
-    return exact + longer
+    return [row for row in rows if folded in str(row.get("label") or "").casefold()]
 
 
 def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
