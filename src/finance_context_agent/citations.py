@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from finance_context_agent.questions import asks_how
+from finance_context_agent.text_numbers import fold_decimal
 
 _NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
 
@@ -124,7 +124,7 @@ def _numbers(
             ):
                 _allow(allowed, raw)
     for token in _NUMBER.findall(text):
-        normalized = _normalize(token)
+        normalized = fold_decimal(token)
         if normalized is not None and normalized in allowed:
             continue
         if token.strip() in allowed:
@@ -213,7 +213,7 @@ def _mentions(text: str, token: str) -> bool:
 
 
 def _allow(allowed: set[str], raw: Any) -> None:
-    normalized = _normalize(raw)
+    normalized = fold_decimal(raw)
     if normalized is not None:
         allowed.add(normalized)
     if isinstance(raw, str) and raw.strip():
@@ -230,30 +230,8 @@ def _wants_precedent(question: str, question_type: str, trace: str) -> bool:
 def _same(left: Any, right: Any) -> bool:
     if left in (None, "") or right in (None, ""):
         return False
-    normalized_left = _normalize(left)
-    normalized_right = _normalize(right)
+    normalized_left = fold_decimal(left)
+    normalized_right = fold_decimal(right)
     if normalized_left is not None and normalized_left == normalized_right:
         return True
     return str(left).strip() == str(right).strip()
-
-
-def _normalize(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace("\u00a0", "").replace(" ", "")
-    if text.endswith("%"):
-        text = text[:-1]
-    if not text:
-        return None
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
-        text = text.replace(",", ".")
-    try:
-        decimal = Decimal(text)
-    except InvalidOperation:
-        return None
-    return format(decimal.normalize(), "f")

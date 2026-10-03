@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from finance_context_agent.citations import direct_precedents, verify_answer, wants_influence
+from finance_context_agent.catalog import _choice_question, _compact_row, _narrow_page
+from finance_context_agent.citations import verify_answer, wants_influence
+from finance_context_agent.draft import _cache_answer, _scalar_observation
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
@@ -676,9 +677,6 @@ def _distinct_rows(pages: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return rows
 
 
-_STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
-
-
 def _series_without_period(observations: list[dict[str, Any]]) -> bool:
     counts: dict[str, int] = {}
     for item in observations:
@@ -720,209 +718,6 @@ def _question_plan(
         "cache_missing": False,
         "terminal": "",
     }
-
-
-_ACRONYM = re.compile(r"\(([A-Za-z]{2,12})\)\s*$")
-_KIND_WORDS = {
-    "abstract": "заголовок",
-    "fact": "значение",
-    "helper": "расчёт",
-    "flag": "флаг",
-    "params": "параметр",
-}
-
-
-def narrow_hits(mention: str, page: dict[str, Any]) -> list[dict[str, Any]]:
-    """Keep a row by its own label. A trailing acronym is the same line."""
-    folded = mention.casefold().strip()
-    rows = _on_own_label(folded, list(page.get("rows") or []))
-    if not folded:
-        return rows
-    exact = [row for row in rows if str(row.get("label") or "").casefold() == folded]
-    if not exact:
-        return rows
-    longer = [
-        row
-        for row in rows
-        if row not in exact and _keeps_longer(str(row.get("label") or ""), folded)
-    ]
-    return exact + longer
-
-
-def _on_own_label(needle: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not needle:
-        return rows
-    return [row for row in rows if needle in str(row.get("label") or "").casefold()]
-
-
-def _keeps_longer(label: str, needle: str) -> bool:
-    found = _ACRONYM.search(label.strip())
-    if found and found.group(1).casefold() == needle:
-        return True
-    folded = label.casefold()
-    if not folded.startswith(needle):
-        return False
-    return len(folded) == len(needle) or not folded[len(needle)].isalnum()
-
-
-def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    rows = list(page.get("rows") or [])
-    total = int(page.get("total") or 0)
-    kept = narrow_hits(mention, page)
-    if len(kept) == len(rows):
-        return mention, page
-    truncated = total > len(rows)
-    if truncated and len(kept) <= 1:
-        return mention, {**page, "rows": kept, "total": total}
-    return mention, {**page, "rows": kept, "total": len(kept)}
-
-
-def _cache_answer(state: dict[str, Any]) -> dict[str, Any]:
-    selected = list(state.get("selected") or [])
-    period_ids = [str(item) for item in (state.get("period_ids") or [])]
-    wanted = {row.get("row_key") for row in selected}
-    scoped = [
-        item
-        for item in (state.get("observations") or [])
-        if item.get("row_key") in wanted
-        and (not period_ids or str(item.get("period_id") or "") in period_ids)
-    ]
-    if period_ids:
-        found = {(item.get("row_key"), str(item.get("period_id") or "")) for item in scoped}
-        missing = any(
-            (row.get("row_key"), period_id) not in found
-            for row in selected
-            for period_id in period_ids
-        )
-        if missing:
-            return {
-                "draft": "Подтверждённого числа в срезе нет.",
-                "citations": [],
-                "missing": True,
-            }
-        ordered = []
-        for row in selected:
-            for period_id in period_ids:
-                ordered.append(
-                    next(
-                        item
-                        for item in scoped
-                        if item.get("row_key") == row.get("row_key")
-                        and str(item.get("period_id") or "") == period_id
-                    )
-                )
-    else:
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for item in scoped:
-            grouped.setdefault(str(item.get("row_key")), []).append(item)
-        one_each = len(grouped) == len(selected) and all(
-            len(items) == 1 for items in grouped.values()
-        )
-        if not one_each:
-            return {
-                "draft": "Подтверждённого числа в срезе нет.",
-                "citations": [],
-                "missing": True,
-            }
-        ordered = [grouped[str(row.get("row_key"))][0] for row in selected]
-    explain = _explains(state)
-    lines: list[str] = []
-    citations: list[dict[str, Any]] = []
-    for item in ordered:
-        line, citation = _line_from_observation(item)
-        if explain:
-            line = "\n".join([line, *_formula_lines(item)])
-        lines.append(line)
-        citations.append(citation)
-    return {"draft": "\n".join(lines), "citations": citations, "missing": False}
-
-
-def _explains(state: dict[str, Any]) -> bool:
-    plan_body = state.get("plan") or {}
-    return plan_body.get("question_type") == "explain" or plan_body.get("trace") == "precedents"
-
-
-def _formula_lines(item: dict[str, Any]) -> list[str]:
-    """Quote the book's formula and its direct inputs. Do not recompute them."""
-    formula = item.get("formula") or {}
-    if not isinstance(formula, dict):
-        formula = {}
-    text = str(formula.get("text") or "").strip()
-    cell = str((item.get("source") or {}).get("cell") or "").strip()
-    directs = direct_precedents(list(formula.get("precedents") or []))
-    lines: list[str] = []
-    if text:
-        lines.append(f"Формула {cell}: {text}" if cell else f"Формула: {text}")
-    bits = [bit for bit in (_precedent_bit(entry) for entry in directs) if bit]
-    if bits:
-        lines.append("Входы: " + "; ".join(bits))
-    if not lines:
-        lines.append("Формулы в книге нет. Это сохранённое значение.")
-    return lines
-
-
-def _precedent_bit(item: dict[str, Any]) -> str:
-    label = str(item.get("label") or "").strip()
-    cell = str(item.get("cell") or "").strip()
-    status = str(item.get("value_status") or "")
-    if status in _STATUS_WORDS:
-        shown = _STATUS_WORDS[status]
-    elif item.get("value") is None:
-        shown = ""
-    else:
-        shown = str(item.get("value"))
-    head = label
-    if cell:
-        head = f"{head} [{cell}]".strip() if head else cell
-    if shown:
-        return f"{head} = {shown}" if head else shown
-    return head
-
-
-def _scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
-    """A params column keyed ``value`` is the scalar slot, not a period on an axis."""
-    period = str(item.get("period_id") or "")
-    if period.casefold() != "value":
-        return item
-    return {**item, "period_id": ""}
-
-
-def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    item = _scalar_observation(item)
-    status = str(item.get("value_status") or "")
-    label = str(item.get("label") or item.get("row_key") or "")
-    period_id = str(item.get("period_id") or "")
-    if status in _STATUS_WORDS:
-        text_value = _STATUS_WORDS[status]
-        cited_value = ""
-    else:
-        cited_value = "" if item.get("value") is None else str(item.get("value"))
-        text_value = cited_value
-        if status != "zero_explicit" and _needs_scale_word(item):
-            text_value = f"{text_value} тыс."
-    if period_id:
-        line = f"{label} в {period_id}: {text_value}"
-    else:
-        line = f"{label}: {text_value}"
-    citation: dict[str, Any] = {
-        "row_key": item.get("row_key"),
-        "period_id": period_id,
-        "cell": (item.get("source") or {}).get("cell") or "",
-        "value": cited_value,
-        "value_status": status,
-    }
-    normalized = item.get("normalized_value")
-    if normalized not in (None, ""):
-        citation["normalized_value"] = normalized
-    return line, citation
-
-
-def _needs_scale_word(item: dict[str, Any]) -> bool:
-    factor = item.get("scale_factor")
-    if factor in (None, 1):
-        return False
-    scale = ((item.get("unit") or {}).get("scale") or "").casefold()
-    return scale == "k"
 
 
 def _phrase_tokens(needle: str, period_keys: set[str]) -> list[str]:
@@ -981,68 +776,6 @@ async def _catalog_pages(
             continue
         add(phrase_item)
     return pages
-
-
-def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
-    lines: list[str] = []
-    for needle, page in pages:
-        total = int(page.get("total") or 0)
-        rows = page.get("rows") or []
-        labels = _menu_labels(rows)
-        line = f"«{needle}»: {total}. {labels}"
-        if total > len(rows):
-            line += f" Показаны первые {len(rows)} из {total}."
-        lines.append(line)
-    return "Какую строку взять?\n" + "\n".join(lines)
-
-
-def _menu_labels(rows: list[dict[str, Any]]) -> str:
-    base = [_label(row) for row in rows]
-    counts: dict[str, int] = {}
-    for text in base:
-        counts[text] = counts.get(text, 0) + 1
-    shown: list[str] = []
-    for row, text in zip(rows, base, strict=True):
-        if counts[text] > 1:
-            word = _KIND_WORDS.get(str(row.get("kind") or ""))
-            if word:
-                text = f"{text}, {word}"
-        shown.append(text)
-    return "; ".join(shown)
-
-
-def _label(row: dict[str, Any]) -> str:
-    label = str(row.get("label") or "")
-    sheet = str(row.get("sheet") or "")
-    heading = _heading(row.get("label_path"), label)
-    mark = ", ".join(part for part in (sheet, heading) if part)
-    if not mark:
-        return label
-    return f"{label} [{mark}]"
-
-
-def _heading(path: Any, label: str) -> str:
-    if not isinstance(path, list):
-        return ""
-    folded = label.casefold()
-    for part in reversed(path):
-        text = str(part).strip()
-        if not text or text.casefold() == folded or any(char.isdigit() for char in text):
-            continue
-        return text
-    return ""
-
-
-def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "row_key": row.get("row_key"),
-        "label": row.get("label"),
-        "sheet": row.get("sheet"),
-        "label_path": list(row.get("label_path") or []),
-        "axis_ids": list(row.get("axis_ids") or []),
-        "disposition": row.get("disposition"),
-        "kind": row.get("kind"),
-    }
 
 
 def _match_job(reply: str, jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
