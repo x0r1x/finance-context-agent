@@ -71,6 +71,23 @@ def test_explicit_zero_citation_is_green_without_a_scale_word() -> None:
     assert result["value_ok"] is True
     assert result["wording_ok"] is True
     assert result["passed"] is True
+    observed = _zero_obs()
+    observed["formula"] = {
+        "text": "=F12*1.1",
+        "precedents": [
+            {"cell": "F12", "label": "Revenue", "value": "15", "period_id": "Y1", "depth": 1}
+        ],
+    }
+    explained = check_answers.score_case(
+        case,
+        _completion(
+            "0\nФормула F13: =F12*1.1\nВходы: Revenue [F12] = 15",
+            [_cite("P&L|13|P&L!r2", "Y1", "0", "zero_explicit")],
+        ),
+        _only(observed),
+    )
+    assert explained["wording_ok"] is True
+    assert explained["passed"] is True
 
 
 def test_y10_citation_on_a_y1_question_is_red() -> None:

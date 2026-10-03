@@ -166,9 +166,7 @@ def _score_ask(
 ) -> tuple[bool, bool, list[str]]:
     folded = content.casefold()
     missing = [
-        piece
-        for piece in expect.get("menu_contains") or []
-        if str(piece).casefold() not in folded
+        piece for piece in expect.get("menu_contains") or [] if str(piece).casefold() not in folded
     ]
     notes: list[str] = []
     if not awaiting:
@@ -200,13 +198,11 @@ def _score_citation_or_ask(
 ) -> tuple[bool, bool, list[str]]:
     if not citations:
         return True, not strays, []
-    allowed = { _pair(item): item for item in expect["allowed"] }
+    allowed = {_pair(item): item for item in expect["allowed"]}
     if len(citations) != 1 or _pair(citations[0]) not in allowed:
         return False, False, ["цитата не из разрешённого списка"]
     chosen = allowed[_pair(citations[0])]
-    ok, note = _value_matches(
-        citations[0], observation_for(*_pair(chosen)), _status(chosen)
-    )
+    ok, note = _value_matches(citations[0], observation_for(*_pair(chosen)), _status(chosen))
     return True, ok, [note] if note else []
 
 
@@ -340,6 +336,14 @@ def _allowed_tokens(
         observation = observation_for(_row(citation), _period(citation))
         if observation:
             raws.append(observation.get("normalized_value"))
+            formula = observation.get("formula") or {}
+            if isinstance(formula, dict):
+                raws.extend(_NUMBER.findall(str(formula.get("text") or "")))
+                for precedent in formula.get("precedents") or []:
+                    if not isinstance(precedent, dict):
+                        continue
+                    raws.append(precedent.get("value"))
+                    raws.append(precedent.get("period_id"))
         for raw in raws:
             _remember(allowed, raw)
     return allowed
@@ -669,7 +673,7 @@ def _lookup(parser: str, job_id: str) -> Any:
 def _observation(parser: str, job_id: str, row_key: str, period_id: str) -> dict[str, Any] | None:
     if not row_key:
         return None
-    params = [("row_key", row_key), ("limit", "8")]
+    params = [("row_key", row_key), ("limit", "8"), ("precedent_depth", "2")]
     if period_id:
         params.append(("period_id", period_id))
     query = urllib.parse.urlencode(params)
@@ -724,9 +728,7 @@ def _empty_result(case: dict[str, Any], note: str) -> dict[str, Any]:
 def _corpus_note(corpus: Path, document: dict[str, Any]) -> dict[str, Any]:
     books = sorted({str(case["book"]) for case in document["cases"]})
     skipped = [
-        str(item.get("file"))
-        for item in document.get("skipped") or []
-        if isinstance(item, dict)
+        str(item.get("file")) for item in document.get("skipped") or [] if isinstance(item, dict)
     ]
     return {
         "dir": str(corpus),
@@ -815,7 +817,7 @@ def _phase_lines(cases: list[dict[str, Any]]) -> list[str]:
     why = [item for item in cases if item.get("group") == "composition"]
     if why:
         lines.append("")
-        lines.append("Состав числа (предшественники не входят в допуск):")
+        lines.append("Состав числа (числа формулы и кэша входов входят в допуск):")
         for item in why:
             flag = "да" if item.get("precedent") else "нет"
             lines.append(f"- `{item['id']}`: предшественники или дыра precedent — {flag}.")

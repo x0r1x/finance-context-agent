@@ -19,7 +19,7 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
         "Дыра precedent означает trace precedents и question_type explain. "
         "Промах поиска меняет needles, а не выдумывает row_key. "
         "needles — только подписи строк, без слова «какой». Период пиши в periods, не в needles. "
-        "explain — только если вопрос про почему или из чего."
+        "explain — если вопрос про почему или из чего, как считается или какая формула."
     )
     citations = [
         {
@@ -48,9 +48,7 @@ def without_account_code(value: Any) -> Any:
     """Drop the parser account code before it reaches a menu, a selection, or the model."""
     if isinstance(value, dict):
         return {
-            key: without_account_code(item)
-            for key, item in value.items()
-            if key != "concept_id"
+            key: without_account_code(item) for key, item in value.items() if key != "concept_id"
         }
     if isinstance(value, list):
         return [without_account_code(item) for item in value]
@@ -63,8 +61,11 @@ def answer_messages(state: dict[str, Any]) -> tuple[str, str]:
     citations = [item for item in (state.get("citations") or []) if item.get("row_key") in allowed]
     system = (
         "Ответь только по наблюдениям. Каждое число в тексте — это value, "
-        "normalized_value или period_id цитаты. Пустую ячейку назови empty или "
-        "not_applicable и не подставляй 0. "
+        "normalized_value или period_id цитаты, число из formula.text или кэш либо "
+        "период прецедента. Пустую ячейку назови empty или not_applicable и не подставляй 0. "
+        "Формулу и входы бери только из formula.text и formula.precedents наблюдения. "
+        "Если их нет, это сохранённое значение. Не пересчитывай и не подставляй формулу, "
+        "которой в наблюдении нет. "
         'JSON: {"text": "...", "citations": [{"row_key", "period_id", "cell", '
         '"value", "value_status", "normalized_value"}]}.'
     )
