@@ -176,9 +176,7 @@ async def test_question_prefix_still_finds_the_named_period() -> None:
     row = catalog_row("P&L|13|P&L!r2", "EBITDA", concept="pnl.ebitda")
     parser.pages[("job-1", "ebitda")] = page([row])
     parser.observations[("job-1", "P&L|13|P&L!r2")] = [
-        observation(
-            "P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit", label="EBITDA"
-        )
+        observation("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit", label="EBITDA")
     ]
     model = ScriptedModel()
     model.push("plan", plan(["Какой EBITDA"], [], "lookup", "none"))
@@ -343,19 +341,34 @@ async def test_number_outside_observations_causes_another_step() -> None:
 async def test_why_at_depth_zero_retries_at_depth_two_without_asking() -> None:
     parser = FakeParser()
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
-    parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "2030", "1.25", "C10")]
+    stored = observation(
+        "row-dscr",
+        "2030",
+        "1.25",
+        "C10",
+        label="DSCR",
+        precedents=[
+            {"cell": "H10", "label": "CFADS", "value": "15", "depth": 1},
+            {"cell": "Z9", "label": "глубокий", "value": "99", "depth": 2},
+        ],
+    )
+    stored["formula"]["text"] = "=H10/I10"
+    parser.observations[("job-1", "row-dscr")] = [stored]
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
-    model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
-    model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
     graph = _graph(parser, model)
-    await _run(graph, "Почему DSCR в 2030 равен 1.25?")
+    await _run(graph, "Как считается DSCR в 2030?")
+    assert parser.catalog_calls[0]["q"] == "DSCR"
     assert [call["precedent_depth"] for call in parser.observation_calls] == [2]
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
     assert snap.values.get("awaiting") in ("", None)
     assert snap.values["satisfactory"] is True
+    draft = snap.values["draft"]
+    assert "=H10/I10" in draft
+    assert "H10" in draft
+    assert "15" in draft
+    assert "Z9" not in draft
+    assert "99" not in draft
 
 
 @pytest.mark.asyncio
@@ -542,14 +555,10 @@ async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
         observation("row-dscr", "2030", "1.25", "C10", label="DSCR")
     ]
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
     model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
-    model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
+    model.push("answer", answer("1.25, вход A1", [cite("row-dscr", "2030", "1.25", "C10")]))
     await graph.ainvoke(
         new_turn_input("А почему?", "job-1"), run_config("thread-1"), durability="sync"
     )
@@ -1136,9 +1145,7 @@ async def test_three_labels_cite_three_rows_without_the_model() -> None:
         parser.pages[("job-1", needle.casefold())] = page(
             [catalog_row(key, needle, axis=["forecast"])]
         )
-        parser.observations[("job-1", key)] = [
-            observation(key, "2030", value, "C1", label=needle)
-        ]
+        parser.observations[("job-1", key)] = [observation(key, "2030", value, "C1", label=needle)]
     model = ScriptedModel()
     graph = _graph(parser, model)
     await _run(graph, "Покажи CFADS, Total debt service и DSCR в 2030")
@@ -1207,8 +1214,10 @@ async def test_cover_question_pauses_without_catalog() -> None:
     assert parser.catalog_calls == []
     assert "P&L" in question
     assert "CFS" in question
-    assert "CFADS" in question
-    assert "DSCR" in question
+    assert "подписей" in question
+    assert "CFADS" not in question
+    assert "DSCR" not in question
+    assert "IRR" not in question
     assert not any(char.isdigit() for char in question)
     assert _seen(model, "plan") == []
 
@@ -1219,12 +1228,8 @@ async def test_cover_phrase_with_two_labels_is_a_compose() -> None:
     parser.axes = [{"id": "point", "periods": []}]
     left = "Average Debt Service Coverage Ratio (DSCR)"
     right = "Minimum Debt Service Coverage Ratio (DSCR)"
-    parser.pages[("job-1", left.casefold())] = page(
-        [catalog_row("avg", left, axis=["point"])]
-    )
-    parser.pages[("job-1", right.casefold())] = page(
-        [catalog_row("min", right, axis=["point"])]
-    )
+    parser.pages[("job-1", left.casefold())] = page([catalog_row("avg", left, axis=["point"])])
+    parser.pages[("job-1", right.casefold())] = page([catalog_row("min", right, axis=["point"])])
     parser.observations[("job-1", "avg")] = [observation("avg", "", "1.8", "L53", label=left)]
     parser.observations[("job-1", "min")] = [observation("min", "", "1.4", "L54", label=right)]
     graph = _graph(parser, ScriptedModel())
@@ -1242,12 +1247,8 @@ async def test_cover_reply_is_planned_in_code() -> None:
     parser.axes = year_axes()
     parser.pages[("job-1", "cfads")] = page([catalog_row("cfs", "CFADS", axis=["forecast"])])
     parser.pages[("job-1", "ebitda")] = page([catalog_row("pnl", "EBITDA", axis=["forecast"])])
-    parser.observations[("job-1", "cfs")] = [
-        observation("cfs", "2030", "10", "A1", label="CFADS")
-    ]
-    parser.observations[("job-1", "pnl")] = [
-        observation("pnl", "2030", "20", "A2", label="EBITDA")
-    ]
+    parser.observations[("job-1", "cfs")] = [observation("cfs", "2030", "10", "A1", label="CFADS")]
+    parser.observations[("job-1", "pnl")] = [observation("pnl", "2030", "20", "A2", label="EBITDA")]
     model = ScriptedModel()
     graph = _graph(parser, model)
     await _run(graph, "Какая общая картина?")

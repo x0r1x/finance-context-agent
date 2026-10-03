@@ -46,6 +46,24 @@ _MENTION_STOP = frozenset(
 )
 _MENTION_EDGE = "?.!,;:«»\"'"
 _COVER_PHRASES = ("ключевые показатели", "общая картина", "обложка")
+# Longer phrases first so a short one does not cut the longer one in half.
+_HOW_PHRASES = (
+    "по какой формуле",
+    "какая формула",
+    "как считается",
+    "как считаются",
+    "как посчитаны",
+    "как посчитана",
+    "как посчитано",
+    "как посчитан",
+    "как рассчитаны",
+    "как рассчитана",
+    "как рассчитано",
+    "как рассчитан",
+    "из чего",
+    "почему",
+    "why",
+)
 
 
 def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
@@ -68,9 +86,16 @@ def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
     return " ".join(tokens)
 
 
+def asks_how(question: str) -> bool:
+    """True when the sentence asks how a row is calculated. The row name stays outside."""
+    folded = question.casefold()
+    return any(phrase in folded for phrase in _HOW_PHRASES)
+
+
 def question_needles(question: str, axes: list[dict[str, Any]]) -> list[str]:
     """One needle per label. A conjunction between periods stays one needle."""
     text, _hit = _strip_cover(question)
+    text = _strip_how(text)
     needles: list[str] = []
     for span in _label_spans(text, axes):
         mention = question_mention(span, axes)
@@ -88,6 +113,13 @@ def _strip_cover(question: str) -> tuple[str, bool]:
             hit = True
             text = pattern.sub(" ", text)
     return text, hit
+
+
+def _strip_how(question: str) -> str:
+    text = question
+    for phrase in _HOW_PHRASES:
+        text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
+    return text
 
 
 def _is_cover(question: str) -> bool:
@@ -122,7 +154,5 @@ def _cover_question(summary: dict[str, Any]) -> str:
     lines = ["Какую строку открыть?"]
     if len(names) >= 2:
         lines.append("Листы: " + ", ".join(names) + ".")
-    lines.append(
-        "Назовите до четырёх: CFADS, обслуживание долга, DSCR, Project IRR, Equity IRR."
-    )
+    lines.append("Назовите до четырёх подписей.")
     return "\n".join(lines)

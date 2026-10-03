@@ -8,7 +8,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from finance_context_agent.citations import verify_answer, wants_influence
+from finance_context_agent.citations import direct_precedents, verify_answer, wants_influence
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
@@ -17,7 +17,12 @@ from finance_context_agent.prompts import (
     plan_messages,
     without_account_code,
 )
-from finance_context_agent.questions import _cover_question, _is_cover, question_needles
+from finance_context_agent.questions import (
+    _cover_question,
+    _is_cover,
+    asks_how,
+    question_needles,
+)
 from finance_context_agent.settings import Settings
 
 _TOKEN_EDGE = "?.!,;:«»\"'[]"
@@ -257,9 +262,7 @@ def build_graph(
                         "row_key": row["row_key"],
                         "period_ids": period_ids,
                         "precedent_depth": depth,
-                        "ids": [
-                            f"{item.get('row_key')}:{item.get('period_id')}" for item in batch
-                        ],
+                        "ids": [f"{item.get('row_key')}:{item.get('period_id')}" for item in batch],
                     }
                 )
                 if document.get("truncated") and not period_ids:
@@ -568,9 +571,7 @@ def _compose(
 ) -> dict[str, Any]:
     if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
         return _miss(state, "Нет совпадений по метрикам.", settings)
-    pending = [
-        (needle, page) for needle, page in pages if int(page.get("total") or 0) != 1
-    ]
+    pending = [(needle, page) for needle, page in pages if int(page.get("total") or 0) != 1]
     if pending:
         return _ask(state, _choice_question(pending), settings=settings)
     return _select(state, _distinct_rows(pages), settings)
@@ -675,7 +676,6 @@ def _distinct_rows(pages: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return rows
 
 
-_WHY_PHRASES = ("почему", "из чего", "why")
 _STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
 
 
@@ -696,7 +696,7 @@ def _question_plan(
     question = str(state.get("question") or "")
     reply = str(state.get("human_reply") or "")
     folded = f"{question.casefold()} {reply.casefold()}"
-    why = any(phrase in folded for phrase in _WHY_PHRASES)
+    why = asks_how(folded)
     if len(needles) > 1:
         question_type = "compose"
     elif len(periods) >= 2 or "сравни" in folded:
@@ -825,13 +825,58 @@ def _cache_answer(state: dict[str, Any]) -> dict[str, Any]:
                 "missing": True,
             }
         ordered = [grouped[str(row.get("row_key"))][0] for row in selected]
+    explain = _explains(state)
     lines: list[str] = []
     citations: list[dict[str, Any]] = []
     for item in ordered:
         line, citation = _line_from_observation(item)
+        if explain:
+            line = "\n".join([line, *_formula_lines(item)])
         lines.append(line)
         citations.append(citation)
     return {"draft": "\n".join(lines), "citations": citations, "missing": False}
+
+
+def _explains(state: dict[str, Any]) -> bool:
+    plan_body = state.get("plan") or {}
+    return plan_body.get("question_type") == "explain" or plan_body.get("trace") == "precedents"
+
+
+def _formula_lines(item: dict[str, Any]) -> list[str]:
+    """Quote the book's formula and its direct inputs. Do not recompute them."""
+    formula = item.get("formula") or {}
+    if not isinstance(formula, dict):
+        formula = {}
+    text = str(formula.get("text") or "").strip()
+    cell = str((item.get("source") or {}).get("cell") or "").strip()
+    directs = direct_precedents(list(formula.get("precedents") or []))
+    lines: list[str] = []
+    if text:
+        lines.append(f"Формула {cell}: {text}" if cell else f"Формула: {text}")
+    bits = [bit for bit in (_precedent_bit(entry) for entry in directs) if bit]
+    if bits:
+        lines.append("Входы: " + "; ".join(bits))
+    if not lines:
+        lines.append("Формулы в книге нет. Это сохранённое значение.")
+    return lines
+
+
+def _precedent_bit(item: dict[str, Any]) -> str:
+    label = str(item.get("label") or "").strip()
+    cell = str(item.get("cell") or "").strip()
+    status = str(item.get("value_status") or "")
+    if status in _STATUS_WORDS:
+        shown = _STATUS_WORDS[status]
+    elif item.get("value") is None:
+        shown = ""
+    else:
+        shown = str(item.get("value"))
+    head = label
+    if cell:
+        head = f"{head} [{cell}]".strip() if head else cell
+    if shown:
+        return f"{head} = {shown}" if head else shown
+    return head
 
 
 def _scalar_observation(item: dict[str, Any]) -> dict[str, Any]:

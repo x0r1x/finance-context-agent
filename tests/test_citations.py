@@ -129,9 +129,7 @@ def test_scale_word_required_for_display_value() -> None:
 
 
 def test_explicit_zero_does_not_need_a_scale_word() -> None:
-    obs = observation(
-        "row", "Y1", "0", "C10", status="zero_explicit", scale_factor=1000, scale="k"
-    )
+    obs = observation("row", "Y1", "0", "C10", status="zero_explicit", scale_factor=1000, scale="k")
     gaps = _check(
         "EBITDA 0.",
         [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}],
@@ -187,26 +185,63 @@ def test_explain_label_without_a_why_question_does_not_need_a_precedent() -> Non
 
 
 def test_why_question_still_needs_a_precedent() -> None:
-    obs = observation("row", "Y1", "0", "C10", status="zero_explicit")
     citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
+    bare = observation("row", "Y1", "0", "C10", status="zero_explicit")
     gaps = _check(
         "Почему EBITDA равен 0?",
         citation,
-        [obs],
+        [bare],
+        question="Почему EBITDA равен 0?",
+        question_type="lookup",
+        trace="none",
+    )
+    assert "precedent" not in gaps
+    linked = observation(
+        "row",
+        "Y1",
+        "0",
+        "C10",
+        status="zero_explicit",
+        precedents=[{"cell": "A1", "value": "0"}],
+    )
+    linked["formula"]["text"] = "=A1"
+    gaps = _check(
+        "Почему EBITDA равен 0?",
+        citation,
+        [linked],
         question="Почему EBITDA равен 0?",
         question_type="lookup",
         trace="none",
     )
     assert "precedent" in gaps
+    told = _check(
+        "Почему EBITDA равен 0? Формула C10: =A1. Входы: A1 = 0",
+        citation,
+        [linked],
+        question="Почему EBITDA равен 0?",
+    )
+    assert "precedent" not in told
 
 
 def test_precedent_trace_needs_a_precedent_even_on_a_lookup_question() -> None:
-    obs = observation("row", "Y1", "0", "C10", status="zero_explicit")
     citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
+    bare = observation("row", "Y1", "0", "C10", status="zero_explicit")
     gaps = _check(
         "EBITDA 0.",
         citation,
-        [obs],
+        [bare],
+        question="Какой EBITDA в Y1?",
+        question_type="lookup",
+        trace="precedents",
+    )
+    assert "precedent" not in gaps
+    linked = observation(
+        "row", "Y1", "0", "C10", status="zero_explicit", precedents=[{"cell": "A1"}]
+    )
+    gaps = _check(
+        "EBITDA 0.",
+        citation,
+        [linked],
         question="Какой EBITDA в Y1?",
         question_type="lookup",
         trace="precedents",
@@ -215,24 +250,12 @@ def test_precedent_trace_needs_a_precedent_even_on_a_lookup_question() -> None:
 
 
 def test_why_without_precedent_fails_until_a_precedent_is_cited() -> None:
+    cited = [{"row_key": "row", "period_id": "2030", "cell": "C10", "value": "1.5"}]
     bare = observation("row", "2030", "1.5", "C10")
-    gaps = _check(
-        "Почему 1.5?",
-        [{"row_key": "row", "period_id": "2030", "cell": "C10", "value": "1.5"}],
-        [bare],
-        question="Почему 1.5?",
-    )
-    assert "precedent" in gaps
+    assert "precedent" not in _check("Почему 1.5?", cited, [bare], question="Почему 1.5?")
     linked = observation("row", "2030", "1.5", "C10", precedents=[{"cell": "A1"}])
-    assert (
-        _check(
-            "Почему 1.5?",
-            [{"row_key": "row", "period_id": "2030", "cell": "C10", "value": "1.5"}],
-            [linked],
-            question="Почему 1.5?",
-        )
-        == []
-    )
+    assert "precedent" in _check("Почему 1.5?", cited, [linked], question="Почему 1.5?")
+    assert _check("Почему 1.5? Вход A1.", cited, [linked], question="Почему 1.5?") == []
 
 
 def test_thousands_separator_matches() -> None:

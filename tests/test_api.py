@@ -209,12 +209,8 @@ async def test_why_after_finish_is_a_new_turn() -> None:
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
     model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
-    model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
+    model.push("answer", answer("1.25, вход A1", [cite("row-dscr", "2030", "1.25", "C10")]))
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         first = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
@@ -227,6 +223,7 @@ async def test_why_after_finish_is_a_new_turn() -> None:
     assert '"question": "А почему?"' in follow
     assert '"human_reply": ""' in follow
     assert "row-dscr" in follow
+    assert parser.observation_calls[-1]["precedent_depth"] == 2
 
 
 @pytest.mark.asyncio
@@ -236,9 +233,7 @@ async def test_thread_busy_while_the_lock_is_held() -> None:
     model = GateModel()
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-        first = asyncio.create_task(
-            client.post("/v1/chat/completions", json=_payload("Какой?"))
-        )
+        first = asyncio.create_task(client.post("/v1/chat/completions", json=_payload("Какой?")))
         await model.entered.wait()
         second = await client.post("/v1/chat/completions", json=_payload("ещё"))
         assert second.status_code == 409

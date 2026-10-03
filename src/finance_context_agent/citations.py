@@ -6,6 +6,8 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from finance_context_agent.questions import asks_how
+
 _NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
 
 _SCALE_WORDS = {
@@ -14,7 +16,6 @@ _SCALE_WORDS = {
     "bn": ("bn", "млрд", "billion"),
 }
 
-_WHY = ("почему", "из чего", "why")
 _INFLUENCE = ("на что влия", "what does it affect")
 
 
@@ -33,7 +34,7 @@ def verify_answer(
     _scale(text, matched, gaps)
     if question_type == "compare" and _sides(matched) < 2:
         gaps.append("compare_sides")
-    if _wants_precedent(question, question_type, trace) and not _has_precedent(matched):
+    if _wants_precedent(question, question_type, trace) and _explanation_missing(text, matched):
         gaps.append("precedent")
     return gaps
 
@@ -87,23 +88,41 @@ def _citation_ok(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
     )
 
 
+def direct_precedents(precedents: list[Any]) -> list[dict[str, Any]]:
+    """Inputs of the formula itself. A missing depth is that same first hop."""
+    found: list[dict[str, Any]] = []
+    for item in precedents:
+        if not isinstance(item, dict):
+            continue
+        depth = item.get("depth")
+        if depth in (None, "", 1, "1"):
+            found.append(item)
+    return found
+
+
 def _numbers(
     text: str,
     matched: list[tuple[dict[str, Any], dict[str, Any]]],
     gaps: list[str],
 ) -> None:
     allowed: set[str] = set()
-    for citation, _observation in matched:
+    for citation, observation in matched:
         for raw in (
             citation.get("value"),
             citation.get("normalized_value"),
             citation.get("period_id"),
         ):
-            normalized = _normalize(raw)
-            if normalized is not None:
-                allowed.add(normalized)
-            if isinstance(raw, str):
-                allowed.add(raw.strip())
+            _allow(allowed, raw)
+        formula_text, precedents = _formula_parts(observation)
+        for token in _NUMBER.findall(formula_text):
+            _allow(allowed, token)
+        for precedent in precedents:
+            for raw in (
+                precedent.get("value"),
+                precedent.get("normalized_value"),
+                precedent.get("period_id"),
+            ):
+                _allow(allowed, raw)
     for token in _NUMBER.findall(text):
         normalized = _normalize(token)
         if normalized is not None and normalized in allowed:
@@ -159,20 +178,53 @@ def _sides(matched: list[tuple[dict[str, Any], dict[str, Any]]]) -> int:
     return len(identities)
 
 
-def _has_precedent(matched: list[tuple[dict[str, Any], dict[str, Any]]]) -> bool:
+def _formula_parts(observation: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    formula = observation.get("formula") or {}
+    if not isinstance(formula, dict):
+        return "", []
+    text = str(formula.get("text") or "").strip()
+    precedents = [item for item in (formula.get("precedents") or []) if isinstance(item, dict)]
+    return text, precedents
+
+
+def _explanation_missing(text: str, matched: list[tuple[dict[str, Any], dict[str, Any]]]) -> bool:
+    folded = text.casefold()
     for _citation, observation in matched:
-        precedents = ((observation.get("formula") or {}).get("precedents")) or []
-        if precedents:
+        formula_text, precedents = _formula_parts(observation)
+        if formula_text and formula_text.casefold() not in folded:
             return True
+        directs = direct_precedents(precedents)
+        cells = [str(item.get("cell") or "").strip() for item in directs]
+        cells = [cell for cell in cells if cell]
+        if cells and not any(_mentions(folded, cell) for cell in cells):
+            return True
+        if not cells:
+            labels = [str(item.get("label") or "").strip() for item in directs if item.get("label")]
+            if labels and not any(_mentions(folded, label) for label in labels):
+                return True
     return False
+
+
+def _mentions(text: str, token: str) -> bool:
+    return (
+        re.search(rf"(?<![\w]){re.escape(token.casefold())}(?!\w)", text, flags=re.IGNORECASE)
+        is not None
+    )
+
+
+def _allow(allowed: set[str], raw: Any) -> None:
+    normalized = _normalize(raw)
+    if normalized is not None:
+        allowed.add(normalized)
+    if isinstance(raw, str) and raw.strip():
+        allowed.add(raw.strip())
 
 
 def _wants_precedent(question: str, question_type: str, trace: str) -> bool:
     del question_type
     if trace == "precedents":
         return True
-    folded = question.casefold()
-    return any(phrase in folded for phrase in _WHY)
+    return asks_how(question)
 
 
 def _same(left: Any, right: Any) -> bool:
