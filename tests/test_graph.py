@@ -5,7 +5,8 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from finance_context_agent.graph import _choice_question, build_graph
+from finance_context_agent.catalog import _choice_question
+from finance_context_agent.graph import build_graph
 from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
 from finance_context_agent.session import interrupts_of

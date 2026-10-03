@@ -16,9 +16,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+from finance_context_agent.text_numbers import fold_decimal
 
 _NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
 _MENU_COUNT = re.compile(r"»: \d+\.|Показаны первые \d+ из \d+\.")
@@ -301,7 +302,7 @@ def _factor_is_one(observation: dict[str, Any]) -> bool:
     factor = observation.get("scale_factor")
     if factor in (None, 1):
         return True
-    return _fold(factor) == "1"
+    return fold_decimal(factor) == "1"
 
 
 def _scale_words(observation: dict[str, Any]) -> tuple[str, ...]:
@@ -356,7 +357,7 @@ def _remember(allowed: set[str], raw: Any) -> None:
     if not text:
         return
     allowed.add(text)
-    folded = _fold(text)
+    folded = fold_decimal(text)
     if folded is not None:
         allowed.add(folded)
 
@@ -365,7 +366,7 @@ def _stray_numbers(text: str, allowed: set[str]) -> list[str]:
     found: list[str] = []
     for token in _NUMBER.findall(text):
         stripped = token.strip()
-        folded = _fold(stripped)
+        folded = fold_decimal(stripped)
         if folded is not None and folded in allowed:
             continue
         if stripped in allowed:
@@ -491,31 +492,9 @@ def _same_text(left: Any, right: Any) -> bool:
     right_text = "" if right is None else str(right).strip()
     if left_text == right_text:
         return True
-    folded_left = _fold(left_text)
-    folded_right = _fold(right_text)
+    folded_left = fold_decimal(left_text)
+    folded_right = fold_decimal(right_text)
     return folded_left is not None and folded_left == folded_right
-
-
-def _fold(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace("\u00a0", "").replace(" ", "")
-    if text.endswith("%"):
-        text = text[:-1]
-    if not text:
-        return None
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
-        text = text.replace(",", ".")
-    try:
-        decimal = Decimal(text)
-    except InvalidOperation:
-        return None
-    return format(decimal.normalize(), "f")
 
 
 def _validate(document: dict[str, Any]) -> None:

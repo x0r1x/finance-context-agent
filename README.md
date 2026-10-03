@@ -205,11 +205,11 @@ A book that is still building is a normal 200. The assistant text is `Книга
 
 ## When an answer is accepted
 
-`satisfactory` is true only when both checks pass.
+`satisfactory` is true when the citation check passes. A gap that is only a missing scale word still publishes the answer.
 
-The citation check requires every number in the assistant text to equal a citation `value` or `normalized_value`, or to match that citation's `period_id`. The cell is one of the observations just retrieved. A scale other than 1 has to be named in the answer. A comparison names both sides. A question that asks why, or what a figure is made of (`почему`, `из чего`, `why`), includes at least one precedent. An empty or `not_applicable` citation passes with `value_status` and no number. A number the slice does not confirm is replaced with `Подтверждённого числа в срезе нет.` and the gap ids are appended.
+The citation check requires every number in the assistant text to equal a citation `value` or `normalized_value`, or to match that citation's `period_id`. The same number may also appear in that observation's formula text or in a direct precedent's `value`, `normalized_value`, or `period_id`. The cell is one of the observations just retrieved. A scale other than 1 has to be named in the answer. A comparison names both sides. When the question asks how a row is calculated (`почему`, `из чего`, `как считается`, `какая формула`, `why`) and the observation has a formula text or a direct precedent, the answer quotes that formula text or a precedent cell. An empty or `not_applicable` citation passes with `value_status` and no number. A number the slice does not confirm is replaced with `Подтверждённого числа в срезе нет.` and the gap ids are appended.
 
-A critic then names any remaining gap. A new gap sends the agent back for another slice, up to four content steps (`CONTENT_BUDGET`). The same gap, the same clarification question, a plan the model cannot express as JSON, or a spent budget closes the turn with `satisfactory: false`. The agent does not ask whether the user is satisfied.
+A new code gap sends the agent back for another slice, up to four content steps (`CONTENT_BUDGET`). The same gap, the same clarification question, a plan the model cannot express as JSON, or a spent budget closes the turn with `satisfactory: false`. The agent does not ask whether the user is satisfied.
 
 A series cut at 48 observations (`OBSERVATION_CAP`) is not averaged. The agent asks for a period. A question about what a row affects also retrieves dependent rows, inside the same cap of 48 observations.
 
