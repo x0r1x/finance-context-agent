@@ -44,8 +44,21 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
     return system, user
 
 
+def without_account_code(value: Any) -> Any:
+    """Drop the parser account code before it reaches a menu, a selection, or the model."""
+    if isinstance(value, dict):
+        return {
+            key: without_account_code(item)
+            for key, item in value.items()
+            if key != "concept_id"
+        }
+    if isinstance(value, list):
+        return [without_account_code(item) for item in value]
+    return value
+
+
 def answer_messages(state: dict[str, Any]) -> tuple[str, str]:
-    observations = list(state.get("observations") or [])
+    observations = without_account_code(list(state.get("observations") or []))
     allowed = {item.get("row_key") for item in observations}
     citations = [item for item in (state.get("citations") or []) if item.get("row_key") in allowed]
     system = (

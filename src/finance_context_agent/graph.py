@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -11,7 +12,12 @@ from finance_context_agent.citations import verify_answer, wants_influence
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
-from finance_context_agent.prompts import answer_messages, critic_messages, plan_messages
+from finance_context_agent.prompts import (
+    answer_messages,
+    critic_messages,
+    plan_messages,
+    without_account_code,
+)
 from finance_context_agent.settings import Settings
 
 _TOKEN_EDGE = "?.!,;:«»\"'[]"
@@ -49,6 +55,7 @@ class AgentState(TypedDict, total=False):
     search_misses: int
     search_note: str
     last_user_question: str
+    label_reply: bool
     clarify_rounds: int
     schema_error: bool
     draft_from_cache: bool
@@ -108,26 +115,35 @@ def build_graph(
         question = str(state.get("question") or "")
         axes = list(state.get("axes") or [])
         reply = str(state.get("human_reply") or "").strip()
-        mention = question_mention(question, axes)
-        named = periods_from_question(question, axes)
-        # Two metric names and no year still need the model to mark the question compose.
-        metric_compose = (
-            "сравни" in question.casefold() and len(mention.split()) >= 2 and len(named) < 2
-        )
-        if mention and not reply and not metric_compose:
-            return _question_plan(state, mention, named, settings)
+        text = reply or question
+        needles = question_needles(text, axes)
+        named = periods_from_question(text, axes)
+        if reply and not named:
+            named = periods_from_question(question, axes)
+        if needles and (not reply or state.get("label_reply")):
+            if len(needles) > settings.max_needles:
+                return _ask(state, "Назовите не больше четырёх.", settings=settings) | {
+                    "label_reply": True
+                }
+            return _question_plan(state, needles, named, settings) | {"label_reply": False}
+        if not reply and _is_cover(question):
+            return _ask(state, _cover_question(state.get("summary") or {}), settings=settings) | {
+                "label_reply": True
+            }
         system, user = plan_messages(state)
         try:
             parsed = await model.complete_json(role="plan", system=system, user=user)
         except SchemaError:
             return _done("Модель не вернула план.", ["schema"])
-        needles = [str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()]
+        model_needles = [
+            str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()
+        ]
         periods = named or list(parsed.get("periods") or [])
         return {
             "content_steps": state.get("content_steps", 0) + 1,
             "plan": {
                 "question_type": parsed.get("question_type") or "lookup",
-                "needles": needles[: settings.max_needles],
+                "needles": model_needles[: settings.max_needles],
                 "periods": periods,
                 "trace": parsed.get("trace") or "none",
                 "source": "model",
@@ -136,6 +152,7 @@ def build_graph(
             "search_again": False,
             "draft_from_cache": False,
             "cache_missing": False,
+            "label_reply": False,
             "terminal": "",
         }
 
@@ -231,7 +248,8 @@ def build_graph(
                     limit=per_call,
                 )
                 batch = [
-                    _scalar_observation(item) for item in (document.get("observations") or [])
+                    without_account_code(_scalar_observation(item))
+                    for item in (document.get("observations") or [])
                 ]
                 steps.append(
                     {
@@ -256,7 +274,7 @@ def build_graph(
             if (
                 plan_body.get("source") == "question"
                 and not period_ids
-                and len(observations) > 1
+                and _series_without_period(observations)
             ):
                 return _ask(state, "Назовите период.", steps=steps, settings=settings)
             if wants_influence(state.get("question") or "", plan_body.get("trace") or ""):
@@ -424,7 +442,11 @@ def build_graph(
         _route_load,
         {"ask_user": "ask_user", "plan": "plan", "close": "close"},
     )
-    builder.add_conditional_edges("plan", _route_plan, {"search": "search", "close": "close"})
+    builder.add_conditional_edges(
+        "plan",
+        _route_plan,
+        {"search": "search", "ask_user": "ask_user", "close": "close"},
+    )
     builder.add_conditional_edges(
         "search",
         _route_search,
@@ -473,6 +495,8 @@ def _route_load(state: dict[str, Any]) -> str:
 def _route_plan(state: dict[str, Any]) -> str:
     if state.get("terminal"):
         return "close"
+    if state.get("awaiting"):
+        return "ask_user"
     return "search"
 
 
@@ -568,10 +592,13 @@ def _single(
 def _compose(
     state: dict[str, Any], pages: list[tuple[str, dict[str, Any]]], settings: Settings
 ) -> dict[str, Any]:
-    if any(int(page.get("total") or 0) != 1 for _needle, page in pages):
-        if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
-            return _miss(state, "Нет совпадений по метрикам.", settings)
-        return _ask(state, _choice_question(pages), settings=settings)
+    if all(int(page.get("total") or 0) == 0 for _needle, page in pages):
+        return _miss(state, "Нет совпадений по метрикам.", settings)
+    pending = [
+        (needle, page) for needle, page in pages if int(page.get("total") or 0) != 1
+    ]
+    if pending:
+        return _ask(state, _choice_question(pending), settings=settings)
     return _select(state, _distinct_rows(pages), settings)
 
 
@@ -706,6 +733,10 @@ _MENTION_STOP = frozenset(
         "год",
         "года",
         "году",
+        "покажи",
+        "покажите",
+        "первую",
+        "первой",
         "первый",
         "первая",
         "первое",
@@ -742,16 +773,90 @@ def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
     return " ".join(tokens)
 
 
+_COVER_PHRASES = ("ключевые показатели", "общая картина", "обложка")
+
+
+def question_needles(question: str, axes: list[dict[str, Any]]) -> list[str]:
+    """One needle per label. A conjunction between periods stays one needle."""
+    text, _hit = _strip_cover(question)
+    needles: list[str] = []
+    for span in _label_spans(text, axes):
+        mention = question_mention(span, axes)
+        if mention:
+            needles.append(mention)
+    return needles
+
+
+def _strip_cover(question: str) -> tuple[str, bool]:
+    text = question
+    hit = False
+    for phrase in _COVER_PHRASES:
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        if pattern.search(text):
+            hit = True
+            text = pattern.sub(" ", text)
+    return text, hit
+
+
+def _is_cover(question: str) -> bool:
+    folded = question.casefold()
+    return any(phrase in folded for phrase in _COVER_PHRASES)
+
+
+def _label_spans(question: str, axes: list[dict[str, Any]]) -> list[str]:
+    pieces = [piece.strip() for piece in re.split(r"\s*,\s*", question) if piece.strip()]
+    spans: list[str] = []
+    for piece in pieces:
+        spans.extend(_split_and(piece, axes))
+    return spans
+
+
+def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
+    match = re.search(r"\s+и\s+", piece, flags=re.IGNORECASE)
+    if match is None:
+        return [piece]
+    left, right = piece[: match.start()], piece[match.end() :]
+    if question_mention(left, axes) and question_mention(right, axes):
+        return _split_and(left, axes) + _split_and(right, axes)
+    return [piece]
+
+
+def _cover_question(summary: dict[str, Any]) -> str:
+    names = [
+        str(sheet)
+        for sheet in (summary.get("sheets") or [])
+        if str(sheet) and not any(char.isdigit() for char in str(sheet))
+    ]
+    lines = ["Какую строку открыть?"]
+    if len(names) >= 2:
+        lines.append("Листы: " + ", ".join(names) + ".")
+    lines.append(
+        "Назовите до четырёх: CFADS, обслуживание долга, DSCR, Project IRR, Equity IRR."
+    )
+    return "\n".join(lines)
+
+
+def _series_without_period(observations: list[dict[str, Any]]) -> bool:
+    counts: dict[str, int] = {}
+    for item in observations:
+        key = str(item.get("row_key"))
+        counts[key] = counts.get(key, 0) + 1
+    return any(count > 1 for count in counts.values())
+
+
 def _question_plan(
     state: dict[str, Any],
-    mention: str,
+    needles: list[str],
     periods: list[dict[str, str]],
     settings: Settings,
 ) -> dict[str, Any]:
     question = str(state.get("question") or "")
-    folded = question.casefold()
+    reply = str(state.get("human_reply") or "")
+    folded = f"{question.casefold()} {reply.casefold()}"
     why = any(phrase in folded for phrase in _WHY_PHRASES)
-    if len(periods) >= 2 or "сравни" in folded:
+    if len(needles) > 1:
+        question_type = "compose"
+    elif len(periods) >= 2 or "сравни" in folded:
         question_type = "compare"
     elif why:
         question_type = "explain"
@@ -761,7 +866,7 @@ def _question_plan(
         "content_steps": state.get("content_steps", 0) + 1,
         "plan": {
             "question_type": question_type,
-            "needles": [mention][: settings.max_needles],
+            "needles": needles[: settings.max_needles],
             "periods": periods,
             "trace": "precedents" if why else "none",
             "source": "question",
@@ -774,13 +879,47 @@ def _question_plan(
     }
 
 
+_ACRONYM = re.compile(r"\(([A-Za-z]{2,12})\)\s*$")
+_KIND_WORDS = {
+    "abstract": "заголовок",
+    "fact": "значение",
+    "helper": "расчёт",
+    "flag": "флаг",
+    "params": "параметр",
+}
+
+
 def narrow_hits(mention: str, page: dict[str, Any]) -> list[dict[str, Any]]:
-    """Keep rows whose own label contains the needle. Concept and path are not read."""
-    folded = mention.strip().casefold()
-    rows = list(page.get("rows") or [])
+    """Keep a row by its own label. A trailing acronym is the same line."""
+    folded = mention.casefold().strip()
+    rows = _on_own_label(folded, list(page.get("rows") or []))
     if not folded:
         return rows
-    return [row for row in rows if folded in str(row.get("label") or "").casefold()]
+    exact = [row for row in rows if str(row.get("label") or "").casefold() == folded]
+    if not exact:
+        return rows
+    longer = [
+        row
+        for row in rows
+        if row not in exact and _keeps_longer(str(row.get("label") or ""), folded)
+    ]
+    return exact + longer
+
+
+def _on_own_label(needle: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not needle:
+        return rows
+    return [row for row in rows if needle in str(row.get("label") or "").casefold()]
+
+
+def _keeps_longer(label: str, needle: str) -> bool:
+    found = _ACRONYM.search(label.strip())
+    if found and found.group(1).casefold() == needle:
+        return True
+    folded = label.casefold()
+    if not folded.startswith(needle):
+        return False
+    return len(folded) == len(needle) or not folded[len(needle)].isalnum()
 
 
 def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -791,7 +930,7 @@ def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any
         return mention, page
     truncated = total > len(rows)
     if truncated and len(kept) <= 1:
-        return mention, {**page, "rows": kept or rows, "total": total}
+        return mention, {**page, "rows": kept, "total": total}
     return mention, {**page, "rows": kept, "total": len(kept)}
 
 
@@ -829,10 +968,20 @@ def _cache_answer(state: dict[str, Any]) -> dict[str, Any]:
                         and str(item.get("period_id") or "") == period_id
                     )
                 )
-    elif len(scoped) == 1:
-        ordered = scoped
     else:
-        return {"draft": "Подтверждённого числа в срезе нет.", "citations": [], "missing": True}
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in scoped:
+            grouped.setdefault(str(item.get("row_key")), []).append(item)
+        one_each = len(grouped) == len(selected) and all(
+            len(items) == 1 for items in grouped.values()
+        )
+        if not one_each:
+            return {
+                "draft": "Подтверждённого числа в срезе нет.",
+                "citations": [],
+                "missing": True,
+            }
+        ordered = [grouped[str(row.get("row_key"))][0] for row in selected]
     lines: list[str] = []
     citations: list[dict[str, Any]] = []
     for item in ordered:
@@ -951,7 +1100,7 @@ def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
     for needle, page in pages:
         total = int(page.get("total") or 0)
         rows = page.get("rows") or []
-        labels = "; ".join(_label(row) for row in rows)
+        labels = _menu_labels(rows)
         line = f"«{needle}»: {total}. {labels}"
         if total > len(rows):
             line += f" Показаны первые {len(rows)} из {total}."
@@ -959,10 +1108,41 @@ def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
     return "Какую строку взять?\n" + "\n".join(lines)
 
 
+def _menu_labels(rows: list[dict[str, Any]]) -> str:
+    base = [_label(row) for row in rows]
+    counts: dict[str, int] = {}
+    for text in base:
+        counts[text] = counts.get(text, 0) + 1
+    shown: list[str] = []
+    for row, text in zip(rows, base, strict=True):
+        if counts[text] > 1:
+            word = _KIND_WORDS.get(str(row.get("kind") or ""))
+            if word:
+                text = f"{text}, {word}"
+        shown.append(text)
+    return "; ".join(shown)
+
+
 def _label(row: dict[str, Any]) -> str:
-    concept = row.get("concept_id") or "без концепта"
-    sheet = row.get("sheet") or ""
-    return f"{row.get('label')} [{sheet}, {concept}]"
+    label = str(row.get("label") or "")
+    sheet = str(row.get("sheet") or "")
+    heading = _heading(row.get("label_path"), label)
+    mark = ", ".join(part for part in (sheet, heading) if part)
+    if not mark:
+        return label
+    return f"{label} [{mark}]"
+
+
+def _heading(path: Any, label: str) -> str:
+    if not isinstance(path, list):
+        return ""
+    folded = label.casefold()
+    for part in reversed(path):
+        text = str(part).strip()
+        if not text or text.casefold() == folded or any(char.isdigit() for char in text):
+            continue
+        return text
+    return ""
 
 
 def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -970,9 +1150,10 @@ def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "row_key": row.get("row_key"),
         "label": row.get("label"),
         "sheet": row.get("sheet"),
-        "concept_id": row.get("concept_id"),
+        "label_path": list(row.get("label_path") or []),
         "axis_ids": list(row.get("axis_ids") or []),
         "disposition": row.get("disposition"),
+        "kind": row.get("kind"),
     }
 
 

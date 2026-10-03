@@ -17,14 +17,18 @@ def catalog_row(
     concept: str | None = "concept.dscr",
     axis: list[str] | None = None,
     decoy: str = "999",
+    label_path: list[str] | None = None,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     return {
         "row_key": key,
         "label": label,
         "sheet": sheet,
+        "label_path": list(label_path or []),
         "concept_id": concept,
         "axis_ids": axis or ["forecast"],
         "disposition": "mapped",
+        "kind": kind,
         "value": decoy,
         "page_marker": "CATALOG_PAGE",
     }

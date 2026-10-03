@@ -42,3 +42,19 @@ def test_plan_prompt_has_axes_and_not_a_catalog_page() -> None:
     assert "не в needles" in system
     assert "без слова «какой»" in system
     assert "почему или из чего" in system
+
+
+def test_answer_prompt_omits_the_account_code() -> None:
+    observed = observation("row-dscr", "2030", "1.25", "C10", label="DSCR")
+    observed["concept_id"] = "cov.dscr"
+    observed["formula"] = {
+        "precedents": [{"row_key": "prec", "concept_id": "cf.cfads", "label": "CFADS"}]
+    }
+    _system, user = answer_messages(
+        {"question": "Какой DSCR?", "observations": [observed], "citations": [], "gaps": []}
+    )
+    assert "concept_id" not in user
+    assert "cov.dscr" not in user
+    assert "cf.cfads" not in user
+    assert "DSCR" in user
+    assert "1.25" in user

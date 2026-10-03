@@ -121,14 +121,14 @@ async def test_compose_keeps_a_missing_metric() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
     parser.pages[("job-1", "ebitda")] = page([catalog_row("row-ebitda", "EBITDA")])
-    model = ScriptedModel()
-    model.push("plan", plan(["EBITDA", "DSCR"], [], "compose", "none"))
-    graph = _graph(parser, model)
+    graph = _graph(parser, ScriptedModel())
     await _run(graph, "Сравни EBITDA и DSCR")
     snap = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(snap)
     assert "Какую строку" in snap.values["user_question"]
+    assert "DSCR" in snap.values["user_question"]
     assert parser.observation_calls == []
+    assert {call["q"] for call in parser.catalog_calls} == {"EBITDA", "DSCR"}
 
 
 @pytest.mark.asyncio
@@ -461,17 +461,7 @@ async def test_two_metrics_make_two_observation_calls() -> None:
     parser.observations[("job-1", "row-ebitda")] = [
         observation("row-ebitda", "2030", "4", "B3", label="EBITDA")
     ]
-    model = ScriptedModel()
-    model.push("plan", plan(["Выручка", "EBITDA"], [{"year": "2030"}], "compose"))
-    model.push(
-        "answer",
-        answer(
-            "Выручка 10 и EBITDA 4.",
-            [cite("row-rev", "2030", "10", "B2"), cite("row-ebitda", "2030", "4", "B3")],
-        ),
-    )
-    model.push("critic", {"gaps": []})
-    graph = _graph(parser, model)
+    graph = _graph(parser, ScriptedModel())
     await _run(graph, "Сравни Выручка и EBITDA в 2030")
     assert len(parser.observation_calls) == 2
     assert {call["row_key"] for call in parser.observation_calls} == {"row-rev", "row-ebitda"}
@@ -792,7 +782,7 @@ async def test_same_concept_longer_label_stays_a_menu() -> None:
 
 
 @pytest.mark.asyncio
-async def test_debt_service_keeps_the_cfads_label() -> None:
+async def test_exact_debt_service_drops_the_longer_cfads_label() -> None:
     parser = FakeParser()
     parser.axes = [{"id": "forecast", "periods": [{"period_key": "Y1"}]}]
     parser.pages[("job-1", "debt service")] = page(
@@ -811,18 +801,19 @@ async def test_debt_service_keeps_the_cfads_label() -> None:
             ),
         ]
     )
+    parser.observations[("job-1", "Debt|17")] = [
+        observation("Debt|17", "Y1", "12", "F17", label="Debt service")
+    ]
     graph = _graph(parser, ScriptedModel())
     await _run(graph, "Какой Debt service в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "Debt service" in question
-    assert "Cash Flow Available for Debt Service (CFADS)" in question
-    assert parser.observation_calls == []
+    assert not interrupts_of(snap)
+    assert parser.observation_calls[0]["row_key"] == "Debt|17"
+    assert [item["row_key"] for item in snap.values["citations"]] == ["Debt|17"]
 
 
 @pytest.mark.asyncio
-async def test_longer_ebitda_stays_with_an_empty_or_other_concept() -> None:
+async def test_exact_ebitda_keeps_the_acronym_line() -> None:
     parser = FakeParser()
     parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
     parser.pages[("job-1", "ebitda")] = page(
@@ -837,9 +828,10 @@ async def test_longer_ebitda_stays_with_an_empty_or_other_concept() -> None:
     snap = await graph.aget_state(run_config("thread-1"))
     question = snap.values["user_question"]
     assert interrupts_of(snap)
-    assert "EBITDA [Model, pnl.ebitda]" in question
+    assert "EBITDA [Model]" in question
     assert "Operating Income or Loss (EBITDA)" in question
-    assert "Reported EBITDA" in question
+    assert "Reported EBITDA" not in question
+    assert "pnl.ebitda" not in question
     assert parser.observation_calls == []
 
 
@@ -858,7 +850,8 @@ async def test_cfads_during_debt_term_stays_beside_the_exact_label() -> None:
     snap = await graph.aget_state(run_config("thread-1"))
     question = snap.values["user_question"]
     assert interrupts_of(snap)
-    assert "CFADS [Model, cf.cfads]" in question
+    assert "CFADS [Model]" in question
+    assert "cf.cfads" not in question
     assert "CFADS during debt term" in question
     assert parser.observation_calls == []
 
@@ -1050,3 +1043,229 @@ async def test_scale_gap_on_a_model_answer_still_publishes() -> None:
     assert snap.values["satisfactory"] is True
     assert snap.values["citations"][0]["value"] == "12.5"
     assert snap.values["gaps"] == []
+
+
+@pytest.mark.asyncio
+async def test_longer_ebitda_stays_in_the_menu() -> None:
+    parser = FakeParser()
+    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
+    parser.pages[("job-1", "ebitda")] = page(
+        [
+            catalog_row("short", "EBITDA", concept="pnl.ebitda", sheet="PF Model"),
+            catalog_row(
+                "long",
+                "Operating Income or Loss (EBITDA)",
+                concept=None,
+                sheet="PF Model",
+            ),
+        ]
+    )
+    graph = _graph(parser, ScriptedModel())
+    await _run(graph, "Какой EBITDA в 2030?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    question = snap.values["user_question"]
+    assert interrupts_of(snap)
+    assert "Operating Income or Loss (EBITDA)" in question
+    assert "EBITDA" in question
+    assert "PF Model" in question
+    assert "pnl.ebitda" not in question
+    assert parser.observation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_path_only_irr_row_stays_out_of_the_menu() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.pages[("job-1", "irr")] = page(
+        [
+            catalog_row("project", "Project IRR", concept=None, label_path=[]),
+            catalog_row("equity", "Equity IRR", concept=None, label_path=["Equity"]),
+            catalog_row("capex", "CAPEX", concept="cf.capex", label_path=["Project IRR"]),
+        ]
+    )
+    graph = _graph(parser, ScriptedModel())
+    await _run(graph, "Какие IRR есть в модели?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    question = snap.values["user_question"]
+    assert interrupts_of(snap)
+    assert "Project IRR" in question
+    assert "Equity IRR" in question
+    assert "Equity" in question
+    assert "CAPEX" not in question
+    assert not snap.values.get("citations")
+
+
+@pytest.mark.asyncio
+async def test_same_label_uses_the_section_heading() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.pages[("job-1", "project irr")] = page(
+        [
+            catalog_row(
+                "heading",
+                "Project IRR",
+                sheet="Ratios",
+                label_path=["Returns"],
+                kind="abstract",
+            ),
+            catalog_row(
+                "value",
+                "Project IRR",
+                sheet="Ratios",
+                label_path=[],
+                kind="fact",
+            ),
+            catalog_row(
+                "other",
+                "Project IRR",
+                sheet="Ratios",
+                label_path=[],
+                kind="abstract",
+            ),
+        ]
+    )
+    graph = _graph(parser, ScriptedModel())
+    await _run(graph, "Какой Project IRR?")
+    question = (await graph.aget_state(run_config("thread-1"))).values["user_question"]
+    assert "Returns" in question
+    assert "значение" in question
+    assert "заголовок" in question
+
+
+@pytest.mark.asyncio
+async def test_three_labels_cite_three_rows_without_the_model() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    rows = (
+        ("CFADS", "cfs", "10"),
+        ("Total debt service", "debt", "20"),
+        ("DSCR", "dscr", "30"),
+    )
+    for needle, key, value in rows:
+        parser.pages[("job-1", needle.casefold())] = page(
+            [catalog_row(key, needle, axis=["forecast"])]
+        )
+        parser.observations[("job-1", key)] = [
+            observation(key, "2030", value, "C1", label=needle)
+        ]
+    model = ScriptedModel()
+    graph = _graph(parser, model)
+    await _run(graph, "Покажи CFADS, Total debt service и DSCR в 2030")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert {call["q"] for call in parser.catalog_calls} == {
+        "CFADS",
+        "Total debt service",
+        "DSCR",
+    }
+    assert {item["row_key"] for item in snap.values["citations"]} == {"cfs", "debt", "dscr"}
+    assert {item["period_id"] for item in snap.values["citations"]} == {"2030"}
+    assert _seen(model, "plan") == []
+
+
+@pytest.mark.asyncio
+async def test_two_forks_pause_without_numbers() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.pages[("job-1", "cfads")] = page(
+        [
+            catalog_row("a", "CFADS"),
+            catalog_row("b", "CFADS during debt term"),
+        ]
+    )
+    parser.pages[("job-1", "ebitda")] = page(
+        [
+            catalog_row("c", "EBITDA"),
+            catalog_row("d", "Operating Income or Loss (EBITDA)", concept=None),
+        ]
+    )
+    model = ScriptedModel()
+    graph = _graph(parser, model)
+    await _run(graph, "Сравни CFADS и EBITDA в 2030")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(snap)
+    question = snap.values["user_question"]
+    assert "CFADS" in question
+    assert "EBITDA" in question
+    assert parser.observation_calls == []
+    assert _seen(model, "plan") == []
+
+
+@pytest.mark.asyncio
+async def test_five_needles_asks_to_narrow() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    graph = _graph(parser, ScriptedModel())
+    await _run(graph, "CFADS, EBITDA, DSCR, IRR, Debt")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(snap)
+    assert snap.values["user_question"] == "Назовите не больше четырёх."
+    assert parser.catalog_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cover_question_pauses_without_catalog() -> None:
+    parser = FakeParser()
+    parser.summary = {"sheets": ["P&L", "CFS", "Debt"], "marker": "passport"}
+    parser.axes = year_axes()
+    model = ScriptedModel()
+    graph = _graph(parser, model)
+    await _run(graph, "Какая общая картина?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    question = snap.values["user_question"]
+    assert interrupts_of(snap)
+    assert parser.catalog_calls == []
+    assert "P&L" in question
+    assert "CFS" in question
+    assert "CFADS" in question
+    assert "DSCR" in question
+    assert not any(char.isdigit() for char in question)
+    assert _seen(model, "plan") == []
+
+
+@pytest.mark.asyncio
+async def test_cover_phrase_with_two_labels_is_a_compose() -> None:
+    parser = FakeParser()
+    parser.axes = [{"id": "point", "periods": []}]
+    left = "Average Debt Service Coverage Ratio (DSCR)"
+    right = "Minimum Debt Service Coverage Ratio (DSCR)"
+    parser.pages[("job-1", left.casefold())] = page(
+        [catalog_row("avg", left, axis=["point"])]
+    )
+    parser.pages[("job-1", right.casefold())] = page(
+        [catalog_row("min", right, axis=["point"])]
+    )
+    parser.observations[("job-1", "avg")] = [observation("avg", "", "1.8", "L53", label=left)]
+    parser.observations[("job-1", "min")] = [observation("min", "", "1.4", "L54", label=right)]
+    graph = _graph(parser, ScriptedModel())
+    await _run(graph, f"Ключевые показатели: {left} и {right}")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert {item["row_key"] for item in snap.values["citations"]} == {"avg", "min"}
+    assert all(call["q"] != "ключевые показатели" for call in parser.catalog_calls)
+    assert {call["q"] for call in parser.catalog_calls} == {left, right}
+
+
+@pytest.mark.asyncio
+async def test_cover_reply_is_planned_in_code() -> None:
+    parser = FakeParser()
+    parser.summary = {"sheets": ["P&L", "CFS"], "marker": "passport"}
+    parser.axes = year_axes()
+    parser.pages[("job-1", "cfads")] = page([catalog_row("cfs", "CFADS", axis=["forecast"])])
+    parser.pages[("job-1", "ebitda")] = page([catalog_row("pnl", "EBITDA", axis=["forecast"])])
+    parser.observations[("job-1", "cfs")] = [
+        observation("cfs", "2030", "10", "A1", label="CFADS")
+    ]
+    parser.observations[("job-1", "pnl")] = [
+        observation("pnl", "2030", "20", "A2", label="EBITDA")
+    ]
+    model = ScriptedModel()
+    graph = _graph(parser, model)
+    await _run(graph, "Какая общая картина?")
+    await graph.ainvoke(
+        Command(resume="CFADS и EBITDA в 2030"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert {item["row_key"] for item in snap.values["citations"]} == {"cfs", "pnl"}
+    assert {item["period_id"] for item in snap.values["citations"]} == {"2030"}
+    assert _seen(model, "plan") == []
