@@ -101,13 +101,11 @@ async def test_chat_completions_body_uses_json_schema() -> None:
     chat = _chat(handler)
     await chat.complete_json(role="plan", system="s", user="u")
     await chat.complete_json(role="answer", system="s", user="u")
-    await chat.complete_json(role="critic", system="s", user="u")
     await chat.aclose()
 
     assert [item["response_format"]["json_schema"]["name"] for item in seen] == [
         "plan",
         "answer",
-        "critic",
     ]
     for payload in seen:
         assert list(payload) == ["model", "temperature", "messages", "response_format"]
@@ -138,7 +136,6 @@ async def test_chat_completions_body_uses_json_schema() -> None:
         "text",
         "citations",
     }
-    assert set(seen[2]["response_format"]["json_schema"]["schema"]["properties"]) == {"gaps"}
 
 
 def _assert_strict_schema(node: object) -> None:

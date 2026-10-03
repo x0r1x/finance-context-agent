@@ -1,4 +1,4 @@
-"""Fixed LangGraph. The model names needles and wording. Code fetches slices."""
+"""Fixed LangGraph. Code names needles from the question and fetches slices."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import (
     answer_messages,
-    critic_messages,
     plan_messages,
     without_account_code,
 )
+from finance_context_agent.questions import _cover_question, _is_cover, question_needles
 from finance_context_agent.settings import Settings
 
 _TOKEN_EDGE = "?.!,;:«»\"'[]"
@@ -359,7 +359,7 @@ def build_graph(
             observations=observed,
         )
         scale_only = bool(code_gaps) and all(str(item).startswith("scale:") for item in code_gaps)
-        if scale_only or (not code_gaps and state.get("draft_from_cache")):
+        if scale_only or not code_gaps:
             return {
                 "gaps": [],
                 "gap_keys": [],
@@ -368,37 +368,11 @@ def build_graph(
                 "citations": _accepted_citations(proposed, observed),
                 "terminal": "",
             }
-        if code_gaps:
-            return {
-                "gaps": code_gaps,
-                "gap_keys": code_gaps,
-                "same_gap": code_gaps == (state.get("gap_keys") or []),
-                "satisfactory": False,
-                "terminal": "",
-            }
-        system, user = critic_messages({**state, "gaps": []})
-        try:
-            parsed = await model.complete_json(role="critic", system=system, user=user)
-        except SchemaError:
-            return {
-                "gaps": ["schema"],
-                "gap_keys": ["schema"],
-                "same_gap": True,
-                "satisfactory": False,
-                "terminal": "",
-            }
-        critic_gaps = _actionable_critic_gaps(list(parsed.get("gaps") or []))
         return {
-            "gaps": critic_gaps,
-            "gap_keys": critic_gaps,
-            "same_gap": bool(critic_gaps) and critic_gaps == (state.get("gap_keys") or []),
-            "satisfactory": not critic_gaps,
-            "citations": _accepted_citations(
-                list(state.get("proposed_citations") or []),
-                list(state.get("observations") or []),
-            )
-            if not critic_gaps
-            else state.get("citations") or [],
+            "gaps": code_gaps,
+            "gap_keys": code_gaps,
+            "same_gap": code_gaps == (state.get("gap_keys") or []),
+            "satisfactory": False,
             "terminal": "",
         }
 
@@ -701,139 +675,8 @@ def _distinct_rows(pages: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return rows
 
 
-_CRITIC_EXACT = {"compare_sides", "precedent", "schema"}
-
-
-def _actionable_critic_gaps(items: list[Any]) -> list[str]:
-    """Keep critic notes the code can replan. A free-text nag must not hide a checked citation."""
-    kept: list[str] = []
-    for item in items:
-        gap = str(item).strip()
-        if gap in _CRITIC_EXACT or gap.startswith(("cell:", "number:", "scale:")):
-            kept.append(gap)
-    return kept
-
-
-_MENTION_STOP = frozenset(
-    {
-        "какой",
-        "какая",
-        "какое",
-        "какие",
-        "почему",
-        "равен",
-        "равна",
-        "равно",
-        "сравни",
-        "в",
-        "и",
-        "на",
-        "за",
-        "по",
-        "год",
-        "года",
-        "году",
-        "покажи",
-        "покажите",
-        "первую",
-        "первой",
-        "первый",
-        "первая",
-        "первое",
-        "операционный",
-        "операционного",
-        "операционном",
-        "начала",
-        "начало",
-        "погашения",
-    }
-)
-_MENTION_EDGE = "?.!,;:«»\"'"
 _WHY_PHRASES = ("почему", "из чего", "why")
 _STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
-
-
-def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
-    """Label text left after period keys, function words, and a bare number."""
-    period_keys = {
-        str(period.get("period_key") or "").casefold()
-        for axis in axes
-        for period in axis.get("periods") or []
-        if period.get("period_key")
-    }
-    tokens: list[str] = []
-    for raw in question.split():
-        token = raw.strip(_MENTION_EDGE)
-        folded = token.casefold()
-        if len(folded) < 2 or folded in _MENTION_STOP or folded in period_keys:
-            continue
-        if folded.isdigit():
-            continue
-        tokens.append(token)
-    return " ".join(tokens)
-
-
-_COVER_PHRASES = ("ключевые показатели", "общая картина", "обложка")
-
-
-def question_needles(question: str, axes: list[dict[str, Any]]) -> list[str]:
-    """One needle per label. A conjunction between periods stays one needle."""
-    text, _hit = _strip_cover(question)
-    needles: list[str] = []
-    for span in _label_spans(text, axes):
-        mention = question_mention(span, axes)
-        if mention:
-            needles.append(mention)
-    return needles
-
-
-def _strip_cover(question: str) -> tuple[str, bool]:
-    text = question
-    hit = False
-    for phrase in _COVER_PHRASES:
-        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
-        if pattern.search(text):
-            hit = True
-            text = pattern.sub(" ", text)
-    return text, hit
-
-
-def _is_cover(question: str) -> bool:
-    folded = question.casefold()
-    return any(phrase in folded for phrase in _COVER_PHRASES)
-
-
-def _label_spans(question: str, axes: list[dict[str, Any]]) -> list[str]:
-    pieces = [piece.strip() for piece in re.split(r"\s*,\s*", question) if piece.strip()]
-    spans: list[str] = []
-    for piece in pieces:
-        spans.extend(_split_and(piece, axes))
-    return spans
-
-
-def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
-    match = re.search(r"\s+и\s+", piece, flags=re.IGNORECASE)
-    if match is None:
-        return [piece]
-    left, right = piece[: match.start()], piece[match.end() :]
-    if question_mention(left, axes) and question_mention(right, axes):
-        return _split_and(left, axes) + _split_and(right, axes)
-    return [piece]
-
-
-def _cover_question(summary: dict[str, Any]) -> str:
-    names = [
-        str(sheet)
-        for sheet in (summary.get("sheets") or [])
-        if str(sheet) and not any(char.isdigit() for char in str(sheet))
-    ]
-    lines = ["Какую строку открыть?"]
-    if len(names) >= 2:
-        lines.append("Листы: " + ", ".join(names) + ".")
-    lines.append(
-        "Назовите до четырёх: CFADS, обслуживание долга, DSCR, Project IRR, Equity IRR."
-    )
-    return "\n".join(lines)
 
 
 def _series_without_period(observations: list[dict[str, Any]]) -> bool:
@@ -1214,7 +1057,8 @@ async def _dependents(
                 limit=min(settings.dependent_observation_limit, remaining),
             )
             batch = [
-                _scalar_observation(item) for item in (document.get("observations") or [])
+                without_account_code(_scalar_observation(item))
+                for item in (document.get("observations") or [])
             ]
             steps.append(
                 {

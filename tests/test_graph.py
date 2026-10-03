@@ -102,7 +102,6 @@ async def test_zero_hit_needle_does_not_hide_one_row() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -158,7 +157,6 @@ async def test_currency_nag_does_not_hide_an_explicit_zero() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    model.push("critic", {"gaps": ["указание валюты"]})
     graph = _graph(parser, model)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -191,7 +189,6 @@ async def test_question_prefix_still_finds_the_named_period() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -243,7 +240,6 @@ async def test_period_key_leaves_one_catalog_query() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "EBITDA Y1")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -266,7 +262,6 @@ async def test_a_hit_phrase_keeps_words_like_in() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["Cash in Bank"], [{"period_key": "Y1"}]))
     model.push("answer", answer("5", [cite("row-cash", "Y1", "5", "C1")]))
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Cash in Bank")
     assert [call["q"] for call in parser.catalog_calls] == ["Cash in Bank"]
@@ -284,7 +279,6 @@ async def test_one_value_requests_one_row_and_named_periods() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
     assert parser.observation_calls == [
@@ -317,7 +311,6 @@ async def test_two_years_of_one_row_are_one_observation_call() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"year": "2030"}, {"period_key": "Y1"}]))
     model.push("answer", answer("В 2030 DSCR 1.25.", [cite("row-dscr", "2030", "1.25", "C10")]))
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Сравни DSCR в 2030 и в Y1")
     assert len(parser.observation_calls) == 1
@@ -337,10 +330,10 @@ async def test_number_outside_observations_causes_another_step() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой?")
     assert len(_seen(model, "answer")) == 2
+    assert all(item["role"] != "critic" for item in model.seen)
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["satisfactory"] is True
     assert snap.values["citations"][0]["value"] == "1.25"
@@ -356,7 +349,6 @@ async def test_why_at_depth_zero_retries_at_depth_two_without_asking() -> None:
     model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
     model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
     model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Почему DSCR в 2030 равен 1.25?")
     assert [call["precedent_depth"] for call in parser.observation_calls] == [2]
@@ -397,7 +389,6 @@ async def test_empty_cache_finishes_without_a_zero() -> None:
     model.push(
         "answer", answer("Ячейка empty.", [cite("row-dscr", "Y1", None, "C10", status="empty")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -481,7 +472,6 @@ async def test_one_phase_year_resolves_without_a_question() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"phase_year": 1}]))
     model.push("answer", answer("В первом году 1.1.", [cite("row-dscr", "Y1", "1.1", "C2")]))
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "DSCR в первый операционный год")
     assert parser.observation_calls[0]["period_ids"] == ["Y1"]
@@ -532,7 +522,6 @@ async def test_two_dscr_rows_resume_cites_the_chosen_row() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     await graph.ainvoke(
         Command(resume="Наблюдённый, не лимит"),
         run_config("thread-1"),
@@ -557,12 +546,10 @@ async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
     model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
     model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
-    model.push("critic", {"gaps": []})
     await graph.ainvoke(
         new_turn_input("А почему?", "job-1"), run_config("thread-1"), durability="sync"
     )
@@ -610,7 +597,6 @@ async def test_changed_etag_reloads_and_drops_stale_citations() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
     parser.book_etag = "etag-2"
@@ -619,7 +605,6 @@ async def test_changed_etag_reloads_and_drops_stale_citations() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     await graph.ainvoke(
         new_turn_input("Какой DSCR в 2030?", "job-1"), run_config("thread-1"), durability="sync"
     )
@@ -686,7 +671,6 @@ async def test_crashed_run_continues_with_empty_input() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     graph = _graph(parser, model)
     with pytest.raises(ModelError):
         await _run(graph, "Какой?")
@@ -720,23 +704,29 @@ async def test_dependents_are_a_second_observation_family() -> None:
     parser = FakeParser()
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
     parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "2030", "1.25", "C10")]
-    parser.observations[("job-1", "row-child")] = [
-        observation("row-child", "2030", "3", "D4", label="child")
-    ]
+    child = observation("row-child", "2030", "3", "D4", label="child")
+    child["concept_id"] = "cov.child"
+    child["formula"] = {
+        "precedents": [{"row_key": "prec", "concept_id": "cf.cfads", "label": "CFADS"}]
+    }
+    parser.observations[("job-1", "row-child")] = [child]
     parser.traces[("job-1", "row-dscr")] = {
         "nodes": [{"row_key": "row-dscr"}, {"row_key": "row-child"}]
     }
-    model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}], "lookup", "dependents"))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
-    model.push("critic", {"gaps": []})
-    graph = _graph(parser, model)
+    graph = _graph(parser, ScriptedModel())
     await _run(graph, "На что влияет DSCR в 2030?")
     assert [call["row_key"] for call in parser.observation_calls] == ["row-dscr", "row-child"]
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["satisfactory"] is True
+    stored = json.dumps(snap.values["observations"], ensure_ascii=False)
+    assert "concept_id" not in stored
+    assert "cov.child" not in stored
+    assert "cf.cfads" not in stored
+    child_row = next(
+        item for item in snap.values["observations"] if item.get("row_key") == "row-child"
+    )
+    assert child_row["label"] == "child"
+    assert child_row["value"] == "3"
 
 
 @pytest.mark.asyncio
@@ -876,6 +866,7 @@ async def test_irr_menu_drops_capex_and_keeps_project_irr() -> None:
     assert "Equity IRR" in question
     assert "CAPEX" not in question
     assert parser.observation_calls == []
+    assert [call["q"] for call in parser.catalog_calls] == ["IRR"]
 
 
 @pytest.mark.asyncio
