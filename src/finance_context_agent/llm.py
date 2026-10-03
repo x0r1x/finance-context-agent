@@ -121,12 +121,7 @@ class Answer(BaseModel):
     citations: list[Citation]
 
 
-class Critic(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    gaps: list[str]
-
-
-_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer, "critic": Critic}
+_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer}
 _SCHEMA_DROP = {"title", "default", "$defs", "$schema", "$comment"}
 
 

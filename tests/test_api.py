@@ -107,7 +107,6 @@ async def test_missing_thread_id_is_minted() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
@@ -145,7 +144,6 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
         model.push(
             "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
         )
-        model.push("critic", {"gaps": []})
         chosen = await client.post(
             "/v1/chat/completions",
             json=_payload("model.xlsx", job_id=JOB),
@@ -192,7 +190,6 @@ async def test_two_dscr_rows_resume_through_the_route() -> None:
         model.push(
             "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
         )
-        model.push("critic", {"gaps": []})
         second = await client.post(
             "/v1/chat/completions",
             json=_payload("Наблюдённый, не лимит"),
@@ -216,10 +213,8 @@ async def test_why_after_finish_is_a_new_turn() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
     model.push("answer", answer("1.25", [cite("row-dscr", "2030", "1.25", "C10")]))
-    model.push("critic", {"gaps": []})
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         first = await client.post("/v1/chat/completions", json=_payload("Какой DSCR в 2030?"))
@@ -264,7 +259,6 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     app, graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
@@ -324,7 +318,6 @@ async def test_job_and_thread_headers_are_accepted() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(

@@ -262,7 +262,7 @@ class FakeParser:
 
 class ScriptedModel:
     def __init__(self) -> None:
-        self.queues: dict[str, list[Any]] = {"plan": [], "answer": [], "critic": []}
+        self.queues: dict[str, list[Any]] = {"plan": [], "answer": []}
         self.seen: list[dict[str, str]] = []
 
     def push(self, role: str, payload: Any) -> ScriptedModel:
@@ -293,8 +293,6 @@ class ByQuestion:
         self.seen.append({"role": role, "system": system, "user": user})
         data = json.loads(user)
         question = str(data.get("question") or "")
-        if role == "critic":
-            return {"gaps": []}
         if "ALPHA" in question:
             if role == "plan":
                 return plan(["ALPHA"], [{"year": "2030"}])

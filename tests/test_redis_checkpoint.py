@@ -122,7 +122,6 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
     )
-    model.push("critic", {"gaps": []})
     async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
         graph = build_graph(parser, model, saver)

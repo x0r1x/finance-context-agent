@@ -1,4 +1,4 @@
-"""Prompts for the planner, the answer, and the critic."""
+"""Prompts for the planner and the answer."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
         "Ты выбираешь подписи строк и периоды для финансового вопроса. "
         "Чисел ячеек у тебя нет, row_key не выдумывай. "
         "Верни JSON с ключами question_type (lookup, compare, explain или compose), "
-        "needles (массив подстрок подписи, до трёх, для compose до четырёх — по одной на метрику), "
+        "needles (массив подстрок подписи, до четырёх — по одной на метрику), "
         "periods (массив объектов period_key, year, phase_year или flag) и "
         "trace (none, precedents или dependents). "
         "precedents — вопрос «почему» или «из чего». dependents — «на что влияет». "
@@ -74,34 +74,6 @@ def answer_messages(state: dict[str, Any]) -> tuple[str, str]:
             "observations": observations,
             "citations": citations,
             "gaps": list(state.get("gaps") or []),
-        },
-        ensure_ascii=False,
-    )
-    return system, user
-
-
-def critic_messages(state: dict[str, Any]) -> tuple[str, str]:
-    system = (
-        "Найди дыры ответа относительно вопроса. Новых чисел не пиши. "
-        "Если текст уже называет value цитаты, верни пустой gaps. "
-        "Не проси валюту, масштаб и предшественников. "
-        'JSON: {"gaps": ["короткая дыра"]}. Пустой список, если цитаты закрывают вопрос.'
-    )
-    citations = [
-        {
-            "row_key": item.get("row_key"),
-            "period_id": item.get("period_id"),
-            "value": item.get("value"),
-            "value_status": item.get("value_status"),
-        }
-        for item in state.get("proposed_citations") or []
-    ]
-    user = json.dumps(
-        {
-            "question": state.get("question"),
-            "text": state.get("draft") or "",
-            "citations": citations,
-            "gaps_already_found": state.get("gaps") or [],
         },
         ensure_ascii=False,
     )
