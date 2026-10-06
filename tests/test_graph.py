@@ -5,10 +5,11 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from finance_context_agent.catalog import _choice_question
+from finance_context_agent.catalog import _choice_question, _narrow_page
 from finance_context_agent.graph import build_graph
 from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
+from finance_context_agent.questions import question_needles
 from finance_context_agent.session import interrupts_of
 from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
@@ -52,12 +53,235 @@ def _slim(values: dict) -> None:
     assert values["axes"][0]["periods"]
 
 
-def test_full_catalog_page_does_not_say_the_list_is_short() -> None:
-    text = _choice_question(
-        [("DSCR", page([catalog_row("a", "Observed"), catalog_row("b", "Limit")]))]
-    )
-    assert "Какую строку" in text
-    assert "из " not in text
+def _menu_text(needle, rows, total, *, narrow: bool):
+    catalog = page(rows, total)
+    if narrow:
+        mention, shown = _narrow_page(needle, catalog)
+    else:
+        mention, shown = needle, catalog
+    keys = [row["row_key"] for row in shown["rows"]]
+    return keys, _choice_question([(mention, shown)])
+
+
+@pytest.mark.parametrize(
+    ("needle", "rows", "total", "narrow", "kept", "present", "absent"),
+    [
+        pytest.param(
+            "Debt service",
+            [
+                catalog_row("Debt|17", "Debt service", concept="debt.scheduled_payment"),
+                catalog_row(
+                    "CFS|14",
+                    "Cash Flow Available for Debt Service (CFADS)",
+                    concept="cf.cfads",
+                ),
+            ],
+            None,
+            True,
+            ["Debt|17"],
+            ["Debt service"],
+            ["CFADS", "Cash Flow Available"],
+            id="exact-debt-service-drops-cfads",
+        ),
+        pytest.param(
+            "EBITDA",
+            [
+                catalog_row("short", "EBITDA", concept="pnl.ebitda"),
+                catalog_row("empty", "Operating Income or Loss (EBITDA)", concept=None),
+                catalog_row("other", "Reported EBITDA", concept="pnl.other"),
+            ],
+            None,
+            True,
+            ["short", "empty"],
+            ["EBITDA [Model]", "Operating Income or Loss (EBITDA)"],
+            ["Reported EBITDA"],
+            id="exact-ebitda-keeps-acronym",
+        ),
+        pytest.param(
+            "CFADS",
+            [
+                catalog_row("exact", "CFADS", concept="cf.cfads"),
+                catalog_row("during", "CFADS during debt term", concept=None),
+            ],
+            None,
+            True,
+            ["exact", "during"],
+            ["CFADS [Model]", "CFADS during debt term"],
+            [],
+            id="cfads-prefix-keeps-debt-term",
+        ),
+        pytest.param(
+            "IRR",
+            [
+                catalog_row("capex", "CAPEX", concept="cf.capex"),
+                catalog_row("project", "Project IRR", concept=None),
+                catalog_row("equity", "Equity IRR", concept="val.irr"),
+            ],
+            None,
+            True,
+            ["project", "equity"],
+            ["Project IRR", "Equity IRR"],
+            ["CAPEX"],
+            id="irr-keeps-project-and-equity",
+        ),
+        pytest.param(
+            "EBITDA",
+            [
+                catalog_row("short", "EBITDA", concept="pnl.ebitda"),
+                catalog_row("long", "Operating Income or Loss (EBITDA)", concept="pnl.ebitda"),
+            ],
+            None,
+            True,
+            ["short", "long"],
+            ["Operating Income or Loss (EBITDA)"],
+            [],
+            id="same-concept-longer-stays",
+        ),
+        pytest.param(
+            "EBITDA",
+            [
+                catalog_row("short", "EBITDA", concept="pnl.ebitda", sheet="PF Model"),
+                catalog_row(
+                    "long",
+                    "Operating Income or Loss (EBITDA)",
+                    concept=None,
+                    sheet="PF Model",
+                ),
+            ],
+            None,
+            True,
+            ["short", "long"],
+            ["Operating Income or Loss (EBITDA)", "EBITDA", "PF Model"],
+            [],
+            id="longer-ebitda-stays-with-sheet",
+        ),
+        pytest.param(
+            "IRR",
+            [
+                catalog_row("project", "Project IRR", concept=None, label_path=[]),
+                catalog_row("equity", "Equity IRR", concept=None, label_path=["Equity"]),
+                catalog_row("capex", "CAPEX", concept="cf.capex", label_path=["Project IRR"]),
+                catalog_row("hidden", "WACC", concept="returns.irr"),
+            ],
+            None,
+            True,
+            ["project", "equity"],
+            ["Project IRR", "Equity IRR", "Model, Equity"],
+            ["CAPEX", "WACC"],
+            id="path-or-concept-only-stays-out",
+        ),
+        pytest.param(
+            "Project IRR",
+            [
+                catalog_row(
+                    "heading",
+                    "Project IRR",
+                    sheet="Ratios",
+                    label_path=["Returns"],
+                    kind="abstract",
+                ),
+                catalog_row("value", "Project IRR", sheet="Ratios", label_path=[], kind="fact"),
+                catalog_row("other", "Project IRR", sheet="Ratios", label_path=[], kind="abstract"),
+            ],
+            None,
+            True,
+            ["heading", "value", "other"],
+            ["Returns", "значение", "заголовок"],
+            [],
+            id="same-label-uses-section-heading",
+        ),
+        pytest.param(
+            "DSCR",
+            [catalog_row("a", "Observed"), catalog_row("b", "Limit")],
+            None,
+            False,
+            ["a", "b"],
+            ["Какую строку"],
+            ["из "],
+            id="full-page-does-not-say-iz",
+        ),
+        pytest.param(
+            "Debt",
+            [catalog_row(f"row-{index}", f"Debt {index}") for index in range(8)],
+            26,
+            True,
+            [f"row-{index}" for index in range(8)],
+            ["8 из 26", "Какую строку"],
+            [],
+            id="short-page-says-how-many",
+        ),
+    ],
+)
+def test_own_label_menu(needle, rows, total, narrow, kept, present, absent) -> None:
+    keys, text = _menu_text(needle, rows, total, narrow=narrow)
+    assert keys == kept
+    for piece in present:
+        assert piece in text
+    for piece in absent:
+        assert piece not in text
+    for row in rows:
+        concept = row.get("concept_id")
+        if concept:
+            assert concept not in text
+
+
+_Y5_Y10 = [{"id": "forecast", "periods": [{"period_key": "Y5"}, {"period_key": "Y10"}]}]
+_YEAR_2026 = [{"id": "forecast", "periods": [{"period_key": "2026"}]}]
+
+
+@pytest.mark.parametrize(
+    ("question", "axes", "expected", "forbidden"),
+    [
+        pytest.param("Какой долг?", year_axes(), ["долг"], "Debt", id="debt-is-not-rewritten"),
+        pytest.param(
+            "Сравни EBITDA в Y5 и в Y10",
+            _Y5_Y10,
+            ["EBITDA"],
+            "Y5",
+            id="period-key-is-not-a-needle",
+        ),
+        pytest.param(
+            "Cash in Bank",
+            year_axes(),
+            ["Cash in Bank"],
+            "в",
+            id="in-stays-inside-the-label",
+        ),
+        pytest.param(
+            "Какие IRR есть в модели?",
+            year_axes(),
+            ["IRR"],
+            "модели",
+            id="irr-question-drops-the-function-words",
+        ),
+        pytest.param(
+            "Какой Operating Income or Loss (EBITDA) в 2026?",
+            _YEAR_2026,
+            ["Operating Income or Loss (EBITDA)"],
+            "2026",
+            id="long-label-is-one-needle",
+        ),
+        pytest.param(
+            "CFADS, EBITDA, DSCR, IRR, Debt",
+            year_axes(),
+            ["CFADS", "EBITDA", "DSCR", "IRR", "Debt"],
+            "четырёх",
+            id="five-needles-stay-five",
+        ),
+        pytest.param(
+            "Какая общая картина?",
+            year_axes(),
+            [],
+            "картина",
+            id="cover-phrase-yields-no-metric-needles",
+        ),
+    ],
+)
+def test_needles_from_the_question(question, axes, expected, forbidden) -> None:
+    found = question_needles(question, axes)
+    assert found == expected
+    assert forbidden not in found
+    assert forbidden not in " ".join(found)
 
 
 @pytest.mark.asyncio
@@ -568,6 +792,8 @@ async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
     assert snap.values["satisfactory"] is True
     follow = _seen(model, "plan")[-1]["user"]
     assert "А почему?" in follow
+    assert '"question": "А почему?"' in follow
+    assert '"human_reply": ""' in follow
     assert "row-dscr" in follow
     assert parser.observation_calls[-1]["precedent_depth"] == 2
 
@@ -764,24 +990,6 @@ async def test_full_operating_label_is_one_catalog_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_concept_longer_label_stays_a_menu() -> None:
-    parser = FakeParser()
-    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
-    parser.pages[("job-1", "ebitda")] = page(
-        [
-            catalog_row("short", "EBITDA", concept="pnl.ebitda"),
-            catalog_row("long", "Operating Income or Loss (EBITDA)", concept="pnl.ebitda"),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какой EBITDA в 2030?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(snap)
-    assert "Operating Income or Loss (EBITDA)" in snap.values["user_question"]
-    assert parser.observation_calls == []
-
-
-@pytest.mark.asyncio
 async def test_exact_debt_service_drops_the_longer_cfads_label() -> None:
     parser = FakeParser()
     parser.axes = [{"id": "forecast", "periods": [{"period_key": "Y1"}]}]
@@ -810,73 +1018,6 @@ async def test_exact_debt_service_drops_the_longer_cfads_label() -> None:
     assert not interrupts_of(snap)
     assert parser.observation_calls[0]["row_key"] == "Debt|17"
     assert [item["row_key"] for item in snap.values["citations"]] == ["Debt|17"]
-
-
-@pytest.mark.asyncio
-async def test_exact_ebitda_keeps_the_acronym_line() -> None:
-    parser = FakeParser()
-    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
-    parser.pages[("job-1", "ebitda")] = page(
-        [
-            catalog_row("short", "EBITDA", concept="pnl.ebitda"),
-            catalog_row("empty", "Operating Income or Loss (EBITDA)", concept=None),
-            catalog_row("other", "Reported EBITDA", concept="pnl.other"),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какой EBITDA в 2030?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "EBITDA [Model]" in question
-    assert "Operating Income or Loss (EBITDA)" in question
-    assert "Reported EBITDA" not in question
-    assert "pnl.ebitda" not in question
-    assert parser.observation_calls == []
-
-
-@pytest.mark.asyncio
-async def test_cfads_during_debt_term_stays_beside_the_exact_label() -> None:
-    parser = FakeParser()
-    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
-    parser.pages[("job-1", "cfads")] = page(
-        [
-            catalog_row("exact", "CFADS", concept="cf.cfads"),
-            catalog_row("during", "CFADS during debt term", concept=None),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какой CFADS в 2030?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "CFADS [Model]" in question
-    assert "cf.cfads" not in question
-    assert "CFADS during debt term" in question
-    assert parser.observation_calls == []
-
-
-@pytest.mark.asyncio
-async def test_irr_menu_drops_capex_and_keeps_project_irr() -> None:
-    parser = FakeParser()
-    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
-    parser.pages[("job-1", "irr")] = page(
-        [
-            catalog_row("capex", "CAPEX", concept="cf.capex"),
-            catalog_row("project", "Project IRR", concept=None),
-            catalog_row("equity", "Equity IRR", concept="val.irr"),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какие IRR есть в модели?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "Project IRR" in question
-    assert "Equity IRR" in question
-    assert "CAPEX" not in question
-    assert parser.observation_calls == []
-    assert [call["q"] for call in parser.catalog_calls] == ["IRR"]
 
 
 @pytest.mark.asyncio
@@ -1044,93 +1185,6 @@ async def test_scale_gap_on_a_model_answer_still_publishes() -> None:
     assert snap.values["satisfactory"] is True
     assert snap.values["citations"][0]["value"] == "12.5"
     assert snap.values["gaps"] == []
-
-
-@pytest.mark.asyncio
-async def test_longer_ebitda_stays_in_the_menu() -> None:
-    parser = FakeParser()
-    parser.axes = [{"id": "forecast", "periods": [{"period_key": "2030"}]}]
-    parser.pages[("job-1", "ebitda")] = page(
-        [
-            catalog_row("short", "EBITDA", concept="pnl.ebitda", sheet="PF Model"),
-            catalog_row(
-                "long",
-                "Operating Income or Loss (EBITDA)",
-                concept=None,
-                sheet="PF Model",
-            ),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какой EBITDA в 2030?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "Operating Income or Loss (EBITDA)" in question
-    assert "EBITDA" in question
-    assert "PF Model" in question
-    assert "pnl.ebitda" not in question
-    assert parser.observation_calls == []
-
-
-@pytest.mark.asyncio
-async def test_path_only_irr_row_stays_out_of_the_menu() -> None:
-    parser = FakeParser()
-    parser.axes = year_axes()
-    parser.pages[("job-1", "irr")] = page(
-        [
-            catalog_row("project", "Project IRR", concept=None, label_path=[]),
-            catalog_row("equity", "Equity IRR", concept=None, label_path=["Equity"]),
-            catalog_row("capex", "CAPEX", concept="cf.capex", label_path=["Project IRR"]),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какие IRR есть в модели?")
-    snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert "Project IRR" in question
-    assert "Equity IRR" in question
-    assert "Equity" in question
-    assert "CAPEX" not in question
-    assert not snap.values.get("citations")
-
-
-@pytest.mark.asyncio
-async def test_same_label_uses_the_section_heading() -> None:
-    parser = FakeParser()
-    parser.axes = year_axes()
-    parser.pages[("job-1", "project irr")] = page(
-        [
-            catalog_row(
-                "heading",
-                "Project IRR",
-                sheet="Ratios",
-                label_path=["Returns"],
-                kind="abstract",
-            ),
-            catalog_row(
-                "value",
-                "Project IRR",
-                sheet="Ratios",
-                label_path=[],
-                kind="fact",
-            ),
-            catalog_row(
-                "other",
-                "Project IRR",
-                sheet="Ratios",
-                label_path=[],
-                kind="abstract",
-            ),
-        ]
-    )
-    graph = _graph(parser, ScriptedModel())
-    await _run(graph, "Какой Project IRR?")
-    question = (await graph.aget_state(run_config("thread-1"))).values["user_question"]
-    assert "Returns" in question
-    assert "значение" in question
-    assert "заголовок" in question
 
 
 @pytest.mark.asyncio

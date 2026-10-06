@@ -1,3 +1,5 @@
+import pytest
+
 from finance_context_agent.citations import verify_answer
 from tests.fakes import observation
 
@@ -184,78 +186,163 @@ def test_explain_label_without_a_why_question_does_not_need_a_precedent() -> Non
     assert "precedent" not in gaps
 
 
-def test_why_question_still_needs_a_precedent() -> None:
-    citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
-    bare = observation("row", "Y1", "0", "C10", status="zero_explicit")
+@pytest.mark.parametrize(
+    (
+        "question",
+        "question_type",
+        "trace",
+        "period",
+        "value",
+        "status",
+        "precedents",
+        "formula",
+        "draft",
+        "gap",
+        "exact",
+    ),
+    [
+        pytest.param(
+            "Почему EBITDA равен 0?",
+            "lookup",
+            "none",
+            "Y1",
+            "0",
+            "zero_explicit",
+            None,
+            None,
+            "Почему EBITDA равен 0?",
+            False,
+            None,
+            id="why-bare",
+        ),
+        pytest.param(
+            "Почему EBITDA равен 0?",
+            "lookup",
+            "none",
+            "Y1",
+            "0",
+            "zero_explicit",
+            [{"cell": "A1", "value": "0"}],
+            "=A1",
+            "Почему EBITDA равен 0?",
+            True,
+            None,
+            id="why-formula-omitted",
+        ),
+        pytest.param(
+            "Почему EBITDA равен 0?",
+            "lookup",
+            "none",
+            "Y1",
+            "0",
+            "zero_explicit",
+            [{"cell": "A1", "value": "0"}],
+            "=A1",
+            "Почему EBITDA равен 0? Формула C10: =A1. Входы: A1 = 0",
+            False,
+            None,
+            id="why-formula-quoted",
+        ),
+        pytest.param(
+            "Какой EBITDA в Y1?",
+            "lookup",
+            "precedents",
+            "Y1",
+            "0",
+            "zero_explicit",
+            None,
+            None,
+            "EBITDA 0.",
+            False,
+            None,
+            id="trace-bare",
+        ),
+        pytest.param(
+            "Какой EBITDA в Y1?",
+            "lookup",
+            "precedents",
+            "Y1",
+            "0",
+            "zero_explicit",
+            [{"cell": "A1"}],
+            None,
+            "EBITDA 0.",
+            True,
+            None,
+            id="trace-linked",
+        ),
+        pytest.param(
+            "Почему 1.5?",
+            "lookup",
+            "none",
+            "2030",
+            "1.5",
+            "cached",
+            None,
+            None,
+            "Почему 1.5?",
+            False,
+            None,
+            id="why-number-bare",
+        ),
+        pytest.param(
+            "Почему 1.5?",
+            "lookup",
+            "none",
+            "2030",
+            "1.5",
+            "cached",
+            [{"cell": "A1"}],
+            None,
+            "Почему 1.5?",
+            True,
+            None,
+            id="why-number-linked",
+        ),
+        pytest.param(
+            "Почему 1.5?",
+            "lookup",
+            "none",
+            "2030",
+            "1.5",
+            "cached",
+            [{"cell": "A1"}],
+            None,
+            "Почему 1.5? Вход A1.",
+            False,
+            [],
+            id="why-number-cited",
+        ),
+    ],
+)
+def test_precedent_gap_follows_formula_or_direct_input(
+    question: str,
+    question_type: str,
+    trace: str,
+    period: str,
+    value: str,
+    status: str,
+    precedents: list[dict] | None,
+    formula: str | None,
+    draft: str,
+    gap: bool,
+    exact: list[str] | None,
+) -> None:
+    cited = [{"row_key": "row", "period_id": period, "cell": "C10", "value": value}]
+    observed = observation("row", period, value, "C10", status=status, precedents=precedents)
+    if formula is not None:
+        observed["formula"]["text"] = formula
     gaps = _check(
-        "Почему EBITDA равен 0?",
-        citation,
-        [bare],
-        question="Почему EBITDA равен 0?",
-        question_type="lookup",
-        trace="none",
+        draft,
+        cited,
+        [observed],
+        question=question,
+        question_type=question_type,
+        trace=trace,
     )
-    assert "precedent" not in gaps
-    linked = observation(
-        "row",
-        "Y1",
-        "0",
-        "C10",
-        status="zero_explicit",
-        precedents=[{"cell": "A1", "value": "0"}],
-    )
-    linked["formula"]["text"] = "=A1"
-    gaps = _check(
-        "Почему EBITDA равен 0?",
-        citation,
-        [linked],
-        question="Почему EBITDA равен 0?",
-        question_type="lookup",
-        trace="none",
-    )
-    assert "precedent" in gaps
-    told = _check(
-        "Почему EBITDA равен 0? Формула C10: =A1. Входы: A1 = 0",
-        citation,
-        [linked],
-        question="Почему EBITDA равен 0?",
-    )
-    assert "precedent" not in told
-
-
-def test_precedent_trace_needs_a_precedent_even_on_a_lookup_question() -> None:
-    citation = [{"row_key": "row", "period_id": "Y1", "cell": "C10", "value": "0"}]
-    bare = observation("row", "Y1", "0", "C10", status="zero_explicit")
-    gaps = _check(
-        "EBITDA 0.",
-        citation,
-        [bare],
-        question="Какой EBITDA в Y1?",
-        question_type="lookup",
-        trace="precedents",
-    )
-    assert "precedent" not in gaps
-    linked = observation(
-        "row", "Y1", "0", "C10", status="zero_explicit", precedents=[{"cell": "A1"}]
-    )
-    gaps = _check(
-        "EBITDA 0.",
-        citation,
-        [linked],
-        question="Какой EBITDA в Y1?",
-        question_type="lookup",
-        trace="precedents",
-    )
-    assert "precedent" in gaps
-
-
-def test_why_without_precedent_fails_until_a_precedent_is_cited() -> None:
-    cited = [{"row_key": "row", "period_id": "2030", "cell": "C10", "value": "1.5"}]
-    bare = observation("row", "2030", "1.5", "C10")
-    assert "precedent" not in _check("Почему 1.5?", cited, [bare], question="Почему 1.5?")
-    linked = observation("row", "2030", "1.5", "C10", precedents=[{"cell": "A1"}])
-    assert "precedent" in _check("Почему 1.5?", cited, [linked], question="Почему 1.5?")
-    assert _check("Почему 1.5? Вход A1.", cited, [linked], question="Почему 1.5?") == []
+    assert ("precedent" in gaps) is gap
+    if exact is not None:
+        assert gaps == exact
 
 
 def test_thousands_separator_matches() -> None:

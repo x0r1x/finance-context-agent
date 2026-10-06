@@ -6,15 +6,7 @@ import re
 from typing import Any
 
 from finance_context_agent.questions import asks_how
-from finance_context_agent.text_numbers import fold_decimal
-
-_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
-
-_SCALE_WORDS = {
-    "k": ("k", "тыс", "thousand"),
-    "m": ("m", "млн", "million"),
-    "bn": ("bn", "млрд", "billion"),
-}
+from finance_context_agent.text_numbers import NUMBER, SCALE_WORDS, fold_decimal
 
 _INFLUENCE = ("на что влия", "what does it affect")
 
@@ -114,7 +106,7 @@ def _numbers(
         ):
             _allow(allowed, raw)
         formula_text, precedents = _formula_parts(observation)
-        for token in _NUMBER.findall(formula_text):
+        for token in NUMBER.findall(formula_text):
             _allow(allowed, token)
         for precedent in precedents:
             for raw in (
@@ -123,7 +115,7 @@ def _numbers(
                 precedent.get("period_id"),
             ):
                 _allow(allowed, raw)
-    for token in _NUMBER.findall(text):
+    for token in NUMBER.findall(text):
         normalized = fold_decimal(token)
         if normalized is not None and normalized in allowed:
             continue
@@ -148,7 +140,7 @@ def _scale(
         if _explicit_zero(citation, observation):
             continue
         scale = ((observation.get("unit") or {}).get("scale") or "").casefold()
-        words = _SCALE_WORDS.get(scale, (scale,) if scale else ())
+        words = SCALE_WORDS.get(scale, (scale,) if scale else ())
         if words and not _has_scale(text, words):
             gaps.append(f"scale:{observation.get('row_key')}")
 

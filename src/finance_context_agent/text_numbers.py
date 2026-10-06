@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
+SCALE_WORDS = {
+    "k": ("k", "тыс", "thousand"),
+    "m": ("m", "млн", "million"),
+    "bn": ("bn", "млрд", "billion"),
+}
 
 
 def fold_decimal(value: Any) -> str | None:
