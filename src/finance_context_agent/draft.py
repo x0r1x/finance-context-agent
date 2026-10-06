@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from finance_context_agent.citations import direct_precedents
+from finance_context_agent.text_numbers import scale_display, scale_factor_is_unit
 
 _STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
 
 
-def _cache_answer(state: dict[str, Any]) -> dict[str, Any]:
+def cache_answer(state: dict[str, Any]) -> dict[str, Any]:
     selected = list(state.get("selected") or [])
     period_ids = [str(item) for item in (state.get("period_ids") or [])]
     wanted = {row.get("row_key") for row in selected}
@@ -111,7 +112,7 @@ def _precedent_bit(item: dict[str, Any]) -> str:
     return head
 
 
-def _scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
+def scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
     """A params column keyed ``value`` is the scalar slot, not a period on an axis."""
     period = str(item.get("period_id") or "")
     if period.casefold() != "value":
@@ -120,7 +121,7 @@ def _scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    item = _scalar_observation(item)
+    item = scalar_observation(item)
     status = str(item.get("value_status") or "")
     label = str(item.get("label") or item.get("row_key") or "")
     period_id = str(item.get("period_id") or "")
@@ -130,8 +131,10 @@ def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     else:
         cited_value = "" if item.get("value") is None else str(item.get("value"))
         text_value = cited_value
-        if status != "zero_explicit" and _needs_scale_word(item):
-            text_value = f"{text_value} тыс."
+        if status != "zero_explicit":
+            suffix = _published_scale(item)
+            if suffix:
+                text_value = f"{text_value} {suffix}"
     if period_id:
         line = f"{label} в {period_id}: {text_value}"
     else:
@@ -149,9 +152,8 @@ def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return line, citation
 
 
-def _needs_scale_word(item: dict[str, Any]) -> bool:
-    factor = item.get("scale_factor")
-    if factor in (None, 1):
-        return False
-    scale = ((item.get("unit") or {}).get("scale") or "").casefold()
-    return scale == "k"
+def _published_scale(item: dict[str, Any]) -> str:
+    if scale_factor_is_unit(item.get("scale_factor")):
+        return ""
+    scale = ((item.get("unit") or {}).get("scale") or "")
+    return scale_display(scale)

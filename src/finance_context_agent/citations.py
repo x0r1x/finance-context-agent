@@ -6,7 +6,12 @@ import re
 from typing import Any
 
 from finance_context_agent.questions import asks_how
-from finance_context_agent.text_numbers import NUMBER, SCALE_WORDS, fold_decimal
+from finance_context_agent.text_numbers import (
+    NUMBER,
+    SCALE_WORDS,
+    fold_decimal,
+    scale_factor_is_unit,
+)
 
 _INFLUENCE = ("на что влия", "what does it affect")
 
@@ -124,34 +129,17 @@ def _numbers(
         gaps.append(f"number:{token.strip()}")
 
 
-def _scale(
-    text: str,
-    matched: list[tuple[dict[str, Any], dict[str, Any]]],
-    gaps: list[str],
-) -> None:
-    for citation, observation in matched:
-        factor = observation.get("scale_factor")
-        if factor in (None, 1):
-            continue
-        if _same(citation.get("value"), observation.get("normalized_value")) and not _same(
-            citation.get("value"), observation.get("value")
-        ):
-            continue
-        if _explicit_zero(citation, observation):
-            continue
-        scale = ((observation.get("unit") or {}).get("scale") or "").casefold()
-        words = SCALE_WORDS.get(scale, (scale,) if scale else ())
-        if words and not _has_scale(text, words):
-            gaps.append(f"scale:{observation.get('row_key')}")
+def scale_words(observation: dict[str, Any]) -> tuple[str, ...]:
+    unit = observation.get("unit") or {}
+    scale = ""
+    if isinstance(unit, dict):
+        scale = str(unit.get("scale") or "").casefold()
+    if scale in SCALE_WORDS:
+        return SCALE_WORDS[scale]
+    return (scale,) if scale else ()
 
 
-def _explicit_zero(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
-    """A stored zero does not need a scale word. The magnitude is still zero."""
-    status = citation.get("value_status") or observation.get("value_status")
-    return status == "zero_explicit" and str(citation.get("value")).strip() == "0"
-
-
-def _has_scale(text: str, words: tuple[str, ...]) -> bool:
+def text_has_scale(text: str, words: tuple[str, ...]) -> bool:
     folded = text.casefold()
     for word in words:
         if not word:
@@ -161,6 +149,37 @@ def _has_scale(text: str, words: tuple[str, ...]) -> bool:
         if len(word) >= 3 and re.search(rf"(?<![^\W\d_]){re.escape(word)}", folded):
             return True
     return False
+
+
+def scale_is_required(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
+    if scale_factor_is_unit(observation.get("scale_factor")):
+        return False
+    if _explicit_zero(citation, observation):
+        return False
+    if _same(citation.get("value"), observation.get("normalized_value")) and not _same(
+        citation.get("value"), observation.get("value")
+    ):
+        return False
+    return bool(scale_words(observation))
+
+
+def _scale(
+    text: str,
+    matched: list[tuple[dict[str, Any], dict[str, Any]]],
+    gaps: list[str],
+) -> None:
+    for citation, observation in matched:
+        if not scale_is_required(citation, observation):
+            continue
+        words = scale_words(observation)
+        if words and not text_has_scale(text, words):
+            gaps.append(f"scale:{observation.get('row_key')}")
+
+
+def _explicit_zero(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
+    """A stored zero does not need a scale word. The magnitude is still zero."""
+    status = citation.get("value_status") or observation.get("value_status")
+    return status == "zero_explicit" and str(citation.get("value")).strip() == "0"
 
 
 def _sides(matched: list[tuple[dict[str, Any], dict[str, Any]]]) -> int:

@@ -122,7 +122,7 @@ def _strip_how(question: str) -> str:
     return text
 
 
-def _is_cover(question: str) -> bool:
+def is_cover(question: str) -> bool:
     folded = question.casefold()
     return any(phrase in folded for phrase in _COVER_PHRASES)
 
@@ -145,7 +145,7 @@ def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
     return [piece]
 
 
-def _cover_question(summary: dict[str, Any]) -> str:
+def cover_question(summary: dict[str, Any]) -> str:
     names = [
         str(sheet)
         for sheet in (summary.get("sheets") or [])
