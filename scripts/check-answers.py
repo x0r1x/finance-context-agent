@@ -19,17 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from finance_context_agent.text_numbers import fold_decimal
+from finance_context_agent.text_numbers import NUMBER, SCALE_WORDS, fold_decimal
 
-_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\w)")
 _MENU_COUNT = re.compile(r"»: \d+\.|Показаны первые \d+ из \d+\.")
 _THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
-
-_SCALE_WORDS = {
-    "k": ("k", "тыс", "thousand"),
-    "m": ("m", "млн", "million"),
-    "bn": ("bn", "млрд", "billion"),
-}
 
 _BOOKS = {"packt-project-finance.xlsx", "rvi-project-finance.xlsx"}
 _GROUPS = {"point", "compare", "calendar", "scalar", "menu", "phase", "composition"}
@@ -310,8 +303,8 @@ def _scale_words(observation: dict[str, Any]) -> tuple[str, ...]:
     scale = ""
     if isinstance(unit, dict):
         scale = str(unit.get("scale") or "").casefold()
-    if scale in _SCALE_WORDS:
-        return _SCALE_WORDS[scale]
+    if scale in SCALE_WORDS:
+        return SCALE_WORDS[scale]
     return (scale,) if scale else ()
 
 
@@ -339,7 +332,7 @@ def _allowed_tokens(
             raws.append(observation.get("normalized_value"))
             formula = observation.get("formula") or {}
             if isinstance(formula, dict):
-                raws.extend(_NUMBER.findall(str(formula.get("text") or "")))
+                raws.extend(NUMBER.findall(str(formula.get("text") or "")))
                 for precedent in formula.get("precedents") or []:
                     if not isinstance(precedent, dict):
                         continue
@@ -364,7 +357,7 @@ def _remember(allowed: set[str], raw: Any) -> None:
 
 def _stray_numbers(text: str, allowed: set[str]) -> list[str]:
     found: list[str] = []
-    for token in _NUMBER.findall(text):
+    for token in NUMBER.findall(text):
         stripped = token.strip()
         folded = fold_decimal(stripped)
         if folded is not None and folded in allowed:
