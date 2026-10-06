@@ -48,7 +48,7 @@ def _keeps_longer(label: str, needle: str) -> bool:
     return len(folded) == len(needle) or not folded[len(needle)].isalnum()
 
 
-def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     rows = list(page.get("rows") or [])
     total = int(page.get("total") or 0)
     kept = narrow_hits(mention, page)
@@ -60,7 +60,7 @@ def _narrow_page(mention: str, page: dict[str, Any]) -> tuple[str, dict[str, Any
     return mention, {**page, "rows": kept, "total": len(kept)}
 
 
-def _choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
+def choice_question(pages: list[tuple[str, dict[str, Any]]]) -> str:
     lines: list[str] = []
     for needle, page in pages:
         total = int(page.get("total") or 0)
@@ -110,7 +110,7 @@ def _heading(path: Any, label: str) -> str:
     return ""
 
 
-def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
+def compact_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "row_key": row.get("row_key"),
         "label": row.get("label"),

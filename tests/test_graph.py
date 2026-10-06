@@ -5,7 +5,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from finance_context_agent.catalog import _choice_question, _narrow_page
+from finance_context_agent.catalog import choice_question, narrow_page
 from finance_context_agent.graph import build_graph
 from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
@@ -56,11 +56,11 @@ def _slim(values: dict) -> None:
 def _menu_text(needle, rows, total, *, narrow: bool):
     catalog = page(rows, total)
     if narrow:
-        mention, shown = _narrow_page(needle, catalog)
+        mention, shown = narrow_page(needle, catalog)
     else:
         mention, shown = needle, catalog
     keys = [row["row_key"] for row in shown["rows"]]
-    return keys, _choice_question([(mention, shown)])
+    return keys, choice_question([(mention, shown)])
 
 
 @pytest.mark.parametrize(

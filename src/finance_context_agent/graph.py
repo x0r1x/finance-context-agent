@@ -7,9 +7,9 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from finance_context_agent.catalog import _choice_question, _compact_row, _narrow_page
+from finance_context_agent.catalog import choice_question, compact_row, narrow_page
 from finance_context_agent.citations import verify_answer, wants_influence
-from finance_context_agent.draft import _cache_answer, _scalar_observation
+from finance_context_agent.draft import cache_answer, scalar_observation
 from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
@@ -19,9 +19,9 @@ from finance_context_agent.prompts import (
     without_account_code,
 )
 from finance_context_agent.questions import (
-    _cover_question,
-    _is_cover,
     asks_how,
+    cover_question,
+    is_cover,
     question_needles,
 )
 from finance_context_agent.settings import Settings
@@ -132,8 +132,8 @@ def build_graph(
                     "label_reply": True
                 }
             return _question_plan(state, needles, named, settings) | {"label_reply": False}
-        if not reply and _is_cover(question):
-            return _ask(state, _cover_question(state.get("summary") or {}), settings=settings) | {
+        if not reply and is_cover(question):
+            return _ask(state, cover_question(state.get("summary") or {}), settings=settings) | {
                 "label_reply": True
             }
         system, user = plan_messages(state)
@@ -193,7 +193,7 @@ def build_graph(
             )
         except ParserError as exc:
             return _terminal_or_raise(exc)
-        pages = [_narrow_page(needle, page) for needle, page in pages]
+        pages = [narrow_page(needle, page) for needle, page in pages]
         if not pages:
             return _miss(state, "Пустой поиск.", settings)
         if (plan_body.get("question_type") or "lookup") == "compose":
@@ -254,7 +254,7 @@ def build_graph(
                     limit=per_call,
                 )
                 batch = [
-                    without_account_code(_scalar_observation(item))
+                    without_account_code(scalar_observation(item))
                     for item in (document.get("observations") or [])
                 ]
                 steps.append(
@@ -300,7 +300,7 @@ def build_graph(
 
     async def answer(state: dict[str, Any]) -> dict[str, Any]:
         if (state.get("plan") or {}).get("source") == "question":
-            built = _cache_answer(state)
+            built = cache_answer(state)
             return {
                 "draft": built["draft"],
                 "proposed_citations": built["citations"],
@@ -563,7 +563,7 @@ def _single(
     useful = [(needle, page) for needle, page in pages if int(page.get("total") or 0) > 0]
     rows = _distinct_rows(useful)
     if any(int(page.get("total") or 0) != 1 for _needle, page in useful) or len(rows) != 1:
-        return _ask(state, _choice_question(useful), settings=settings)
+        return _ask(state, choice_question(useful), settings=settings)
     return _select(state, rows, settings)
 
 
@@ -574,7 +574,7 @@ def _compose(
         return _miss(state, "Нет совпадений по метрикам.", settings)
     pending = [(needle, page) for needle, page in pages if int(page.get("total") or 0) != 1]
     if pending:
-        return _ask(state, _choice_question(pending), settings=settings)
+        return _ask(state, choice_question(pending), settings=settings)
     return _select(state, _distinct_rows(pages), settings)
 
 
@@ -617,7 +617,7 @@ def _select(
             "Период не находится на оси строки. Назовите ключ или год.",
             settings=settings,
         )
-    selected = [_compact_row(row) for row in rows]
+    selected = [compact_row(row) for row in rows]
     steps = list(state.get("steps") or [])
     steps.append(
         {
@@ -835,7 +835,7 @@ async def _dependents(
                 limit=min(settings.dependent_observation_limit, remaining),
             )
             batch = [
-                without_account_code(_scalar_observation(item))
+                without_account_code(scalar_observation(item))
                 for item in (document.get("observations") or [])
             ]
             steps.append(

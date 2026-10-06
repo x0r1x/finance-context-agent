@@ -1,6 +1,7 @@
 import pytest
 
 from finance_context_agent.citations import verify_answer
+from finance_context_agent.text_numbers import scale_display
 from tests.fakes import observation
 
 
@@ -128,6 +129,9 @@ def test_scale_word_required_for_display_value() -> None:
         [obs],
     )
     assert present == []
+    assert scale_display("k") == "тыс."
+    assert scale_display("m") == "млн."
+    assert scale_display("bn") == "млрд."
 
 
 def test_explicit_zero_does_not_need_a_scale_word() -> None:

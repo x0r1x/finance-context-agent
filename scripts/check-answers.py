@@ -19,7 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from finance_context_agent.text_numbers import NUMBER, SCALE_WORDS, fold_decimal
+from finance_context_agent.citations import scale_is_required, scale_words, text_has_scale
+from finance_context_agent.text_numbers import NUMBER, fold_decimal
 
 _MENU_COUNT = re.compile(r"»: \d+\.|Показаны первые \d+ из \d+\.")
 _THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
@@ -268,56 +269,12 @@ def _scale_notes(
     notes: list[str] = []
     for citation in citations:
         observation = observation_for(_row(citation), _period(citation))
-        if observation is None or not _scale_required(citation, observation):
+        if observation is None or not scale_is_required(citation, observation):
             continue
-        words = _scale_words(observation)
-        if words and not _has_scale(content, words):
+        words = scale_words(observation)
+        if words and not text_has_scale(content, words):
             notes.append(f"не назван масштаб {words[0]}")
     return notes
-
-
-def _scale_required(citation: dict[str, Any], observation: dict[str, Any]) -> bool:
-    if _factor_is_one(observation):
-        return False
-    status = citation.get("value_status") or observation.get("value_status")
-    if status == "zero_explicit" and str(citation.get("value") or "").strip() == "0":
-        return False
-    normalized = observation.get("normalized_value")
-    display = observation.get("value")
-    if _same_text(citation.get("value"), normalized) and not _same_text(
-        citation.get("value"), display
-    ):
-        return False
-    return bool(_scale_words(observation))
-
-
-def _factor_is_one(observation: dict[str, Any]) -> bool:
-    factor = observation.get("scale_factor")
-    if factor in (None, 1):
-        return True
-    return fold_decimal(factor) == "1"
-
-
-def _scale_words(observation: dict[str, Any]) -> tuple[str, ...]:
-    unit = observation.get("unit") or {}
-    scale = ""
-    if isinstance(unit, dict):
-        scale = str(unit.get("scale") or "").casefold()
-    if scale in SCALE_WORDS:
-        return SCALE_WORDS[scale]
-    return (scale,) if scale else ()
-
-
-def _has_scale(text: str, words: tuple[str, ...]) -> bool:
-    folded = text.casefold()
-    for word in words:
-        if not word:
-            continue
-        if re.search(rf"(?<![^\W\d_]){re.escape(word)}(?!\w)", folded):
-            return True
-        if len(word) >= 3 and re.search(rf"(?<![^\W\d_]){re.escape(word)}", folded):
-            return True
-    return False
 
 
 def _allowed_tokens(
