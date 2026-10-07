@@ -17,6 +17,7 @@ The questions the agent asks the user are in Russian, because the prompts are Ru
 - [Docker](#docker)
 - [Ask a question](#ask-a-question)
 - [HTTP API](#http-api)
+- [Chat clients](#chat-clients)
 - [When an answer is accepted](#when-an-answer-is-accepted)
 - [Sessions](#sessions)
 - [Checks](#checks)
@@ -112,7 +113,7 @@ curl -sS http://127.0.0.1:8090/v1/chat/completions \
   }'
 ```
 
-`job_id` matches `^[A-Za-z0-9._-]{1,128}$`. `thread_id` matches `^[A-Za-z0-9_-]{1,255}$`. Omit `thread_id` and the agent mints a UUID and returns it. Omit `job_id` on a new dialog and the agent lists succeeded books by file name and waits:
+`job_id` matches `^[A-Za-z0-9._-]{1,128}$`. `thread_id` matches `^[A-Za-z0-9_-]{1,255}$`. Omit `thread_id` and the agent derives a stable id from the first user message and the optional `user` field: `c` plus 32 hex characters of SHA-256. The same opening returns the same id. A later request that includes the assistant reply continues that dialog. The same first message with no assistant reply repeats an open pause and does not answer it. Two chats that open with the same text share one dialog unless they send `thread_id` or a different `user`. Omit `job_id` on a new dialog and the agent lists succeeded books by file name and waits:
 
 ```text
 Какую книгу открыть?
@@ -174,19 +175,19 @@ Other pauses, in the words the agent sends:
 | Chosen rows do not share one period | `Период не один на всех выбранных строках. Назовите ключ.` |
 | Observations were truncated and no period was named | `Ряд обрезан лимитом 48. Назовите период, среднее по обрезанному ряду не считается.` |
 
-`stream: true` is 400 `stream_unsupported`. The `model` field of the request is ignored.
+`stream: true` waits until the turn finishes, then returns `text/event-stream`: one chunk whose `delta.content` is the full pause or answer, a second chunk with an empty `delta` and `finish_reason` `stop`, then the line `data: [DONE]`. Newlines in the text stay inside the JSON. This is not token streaming of the model. `stream: false` is the JSON body above. A request that fails before the turn still returns `{"error": "<code>"}`, including when `stream` is true. The `model` field of the request is ignored. An `Authorization` header is ignored.
 
 ## HTTP API
 
 - `GET /healthz` — process liveness.
 - `GET /readyz` — Redis and the parser. 503 when either is down.
+- `GET /v1/models` — the single model id `finance-context-agent`.
 - `POST /v1/chat/completions` — one turn, or a resume of a paused turn.
 
 An error body is always `{"error": "<code>"}`.
 
 | code | HTTP |
 | --- | --- |
-| `stream_unsupported` | 400 |
 | `messages_required` | 400 |
 | `last_message_not_user` | 400 |
 | `user_message_required` | 400 |
@@ -201,6 +202,29 @@ The last message must be `user`. `content` is a string, or a list of parts whose
 A book that is still building is a normal 200. The assistant text is `Книга ещё собирается.` and `satisfactory` is false. An unknown job id is `Книга не найдена.`, also 200. There is no succeeded book to choose from: `Готовых книг нет.` A network error, a timeout, or an HTTP 5xx from the parser or the model is 503 `upstream_unavailable`. The parser client waits 15 seconds (`PARSER_TIMEOUT_SEC`). The model client waits 60 seconds (`LLM_TIMEOUT_SEC`).
 
 `gaps` names what failed. Examples: `report_not_ready`, `not_found`, `number:…`, `cell:…`, `scale:…`, `precedent`, `compare_sides`, `schema`, `clarify`. A citation carries `row_key`, `period_id`, `cell`, and when present `value` and `value_status` (`cached`, `empty`, `zero_explicit`, `not_applicable`). `steps` records the search and the observation calls of the turn.
+
+## Chat clients
+
+Open WebUI and LibreChat call the agent as an OpenAI-compatible chat server. The base URL is the `/v1` root: `http://127.0.0.1:8090/v1` from the host, or `http://host.docker.internal:8090/v1` from a chat container. The agent does not check the API key.
+
+Open WebUI: Admin → Connections → OpenAI. Use that URL, Provider Default, and any key. After Verify Connection succeeds, Model IDs can stay empty, or set `finance-context-agent`. Leave conversation titles on another model. A title request to this agent is a question about the book.
+
+LibreChat, in `librechat.yaml`:
+
+```yaml
+endpoints:
+  custom:
+    - name: "Finance"
+      apiKey: "local"
+      baseURL: "http://host.docker.internal:8090/v1"
+      models:
+        default: ["finance-context-agent"]
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: "Finance"
+```
+
+`titleConvo: false` keeps the dialog name in LibreChat. A title request would otherwise open another turn on this agent.
 
 ## When an answer is accepted
 
@@ -237,7 +261,7 @@ JOB_ID=<parser job_id> bash scripts/run.sh 'Какой DSCR в 2030?'
 THREAD_ID=<thread_id from summary.txt> JOB_ID=<parser job_id> bash scripts/ask.sh 'Наблюдённый'
 ```
 
-`bash scripts/run.sh` checks `GET /healthz`, `GET /readyz` (Redis and the parser both answer), and the 400 responses that return before the model: `stream_unsupported`, `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id`, and `bad_job_id` from the body and from `X-Job-Id`.
+`bash scripts/run.sh` checks `GET /healthz`, `GET /readyz` (Redis and the parser both answer), and the 400 responses that return before the lock and the model: `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id`, and `bad_job_id` from the body and from `X-Job-Id`.
 
 A question writes `completion.json`. The check requires HTTP 200, `object` `chat.completion`, `model` `finance-context-agent`, and `finish_reason` `stop`. `awaiting_user: true` is a successful check. The assistant text is the pause, and `satisfactory` stays with the book and the model. The third command sends the next user message on that `thread_id`. The server decides whether that resumes the pause or starts a new turn.
 
@@ -245,7 +269,7 @@ The run directory is `out/<timestamp>/`:
 
 ```text
 healthz.json  readyz.json  summary.txt
-error-stream.json  error-messages.json  error-role.json  error-empty.json
+error-messages.json  error-role.json  error-empty.json
 error-thread.json  error-job.json  error-header-job.json
 ask.json  completion.json
 ```

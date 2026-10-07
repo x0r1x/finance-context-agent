@@ -20,8 +20,23 @@ class ChatRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage] = []
     stream: bool = False
+    user: str | None = None
     job_id: str | None = None
     thread_id: str | None = None
+
+
+def first_user_text(messages: list[ChatMessage]) -> str:
+    for message in messages:
+        if message.role != "user":
+            continue
+        text = _content_text(message.content).strip()
+        if text:
+            return text
+    return ""
+
+
+def history_has_assistant(messages: list[ChatMessage]) -> bool:
+    return any(message.role == "assistant" for message in messages)
 
 
 def last_user_text(messages: list[ChatMessage]) -> str:
