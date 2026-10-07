@@ -24,7 +24,7 @@ The questions the agent asks the user are in Russian, because the prompts are Ru
 
 ## Where the workbook comes from
 
-Excel is parsed by finance-context-builder. Upload stays on the parser, `POST /v1/context-jobs`, and the agent starts from a finished job. A question about a row calls the parser over HTTP and reads three slices: the summary passport, the catalog (labels and period axes, no cell cache), and observations (the cache for the chosen rows). A book overview also reads `GET /v1/context-jobs/{id}/context.json`, copies the stored row summaries into the answer, and does not send that file to the model. `graph.json` stays on the parser. Formulas stay as the cache stored them. This repository does not import the `finance_context` package.
+Excel is parsed by finance-context-builder. Upload stays on the parser, `POST /v1/context-jobs`, and the agent starts from a finished job. A question about a row calls the parser over HTTP and reads three slices: the summary passport, the catalog (labels and period axes, no cell cache), and observations (the cache for the chosen rows). A book overview also reads `GET /v1/context-jobs/{id}/context.json` and answers with the book's own sections and the stored figures of the live rows. Rows the parser marked excluded, and the workbook audit (formula counts, cache warnings, mapping totals), stay out of that text. The file is not sent to the model. `graph.json` stays on the parser. Formulas stay as the cache stored them. This repository does not import the `finance_context` package.
 
 A row the parser left without a concept is still found by its label. Its `concept_id` stays empty.
 

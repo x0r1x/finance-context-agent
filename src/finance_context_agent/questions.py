@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Any
 
-from finance_context_agent.text_numbers import scale_display
+from finance_context_agent.text_numbers import display_cached, fold_decimal, scale_display
 
 _MENTION_STOP = frozenset(
     {
@@ -166,55 +167,38 @@ def cover_question(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-_STAT_LABELS = (
-    ("mapped", "сопоставлено"),
-    ("abstract", "заголовки"),
-    ("excluded", "исключены"),
-    ("abstained", "воздержались"),
-)
+_DATE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+_LIVE = frozenset({"mapped", "abstained"})
 
 
 def book_overview(document: dict[str, Any]) -> str:
-    """Copy the stored row summaries. The document itself is not kept."""
+    """Sections and stored figures of the live rows. The document is not kept."""
     meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
-    workbook = document.get("workbook") if isinstance(document.get("workbook"), dict) else {}
     lines: list[str] = []
     filename = str(meta.get("source_filename") or "").strip()
     if filename:
-        lines.append(f"Книга {filename}.")
-    names = _sheet_names(workbook.get("sheets"))
-    if len(names) >= 2:
-        lines.append("Листы: " + ", ".join(names) + ".")
-    formula_count = _positive_count(workbook.get("formula_count"))
-    if formula_count is not None:
-        lines.append(f"Формул: {formula_count}.")
-    missing_cache = _positive_count(workbook.get("missing_cached_values"))
-    if missing_cache is not None:
-        lines.append(f"Без сохранённого кэша: {missing_cache}.")
-    lines.extend(_period_lines(document.get("axes")))
-    for item in document.get("warnings") or []:
-        text = str(item).strip()
-        if not text:
-            continue
-        if not text.endswith("."):
-            text += "."
-        lines.append(f"Предупреждение: {text}")
-    stats = _stats_line(document.get("mapping_stats"))
-    if stats:
-        lines.append(stats)
-    seen_sheet = ""
+        lines.append(filename)
+    pending: str | None = None
+    last_heading = ""
     for block in document.get("blocks") or []:
         if not isinstance(block, dict):
             continue
-        sheet = str(block.get("sheet") or "").strip()
-        if sheet and sheet != seen_sheet:
-            lines.append(f"Лист {sheet}.")
-            seen_sheet = sheet
         for row in block.get("rows") or []:
-            line = _overview_row(row)
-            if line:
-                lines.append(line)
-    lines.append("Назовите подписи.")
+            if not isinstance(row, dict):
+                continue
+            if _is_heading(row):
+                label = _label(row)
+                if label:
+                    pending = label
+                continue
+            rendered = _metric_line(row)
+            if rendered is None:
+                continue
+            if pending and pending != last_heading:
+                lines.append(f"## {pending}")
+                last_heading = pending
+            pending = None
+            lines.append(rendered)
     return "\n".join(lines)
 
 
@@ -226,67 +210,112 @@ def _sheet_names(sheets: Any) -> list[str]:
     ]
 
 
-def _period_lines(axes: Any) -> list[str]:
-    found = [
-        axis
-        for axis in (axes or [])
-        if isinstance(axis, dict) and isinstance(axis.get("periods"), list) and axis["periods"]
-    ]
-    if len(found) == 1:
-        return [f"Периодов: {len(found[0]['periods'])}."]
-    lines: list[str] = []
-    for axis in found:
-        count = len(axis["periods"])
-        sheet = str(axis.get("sheet") or "").strip()
-        if sheet:
-            lines.append(f"Периодов, {sheet}: {count}.")
-        else:
-            lines.append(f"Периодов: {count}.")
-    return lines
+def _is_heading(row: dict[str, Any]) -> bool:
+    if row.get("hidden") is True or row.get("disposition") == "excluded":
+        return False
+    return row.get("kind") == "abstract" or row.get("disposition") == "header"
 
 
-def _stats_line(stats: Any) -> str | None:
-    if not isinstance(stats, dict):
-        return None
-    parts = [
-        f"{title} {_positive_count(stats.get(key))}"
-        for key, title in _STAT_LABELS
-        if _positive_count(stats.get(key)) is not None
-    ]
-    if not parts:
-        return None
-    return "Строк: " + ", ".join(parts) + "."
-
-
-def _overview_row(row: Any) -> str | None:
-    if not isinstance(row, dict):
-        return None
+def _label(row: dict[str, Any]) -> str:
     label = str(row.get("label") or "").strip()
+    if not label or label.casefold() == "none":
+        return ""
+    return label
+
+
+def _metric_line(row: dict[str, Any]) -> str | None:
+    if row.get("disposition") not in _LIVE or row.get("hidden") is True:
+        return None
+    if row.get("article_role") == "check":
+        return None
+    label = _label(row)
     if not label:
         return None
-    if row.get("kind") == "abstract" or row.get("disposition") == "header":
-        return f"{label}."
-    numbers = _summary_clause(row.get("numeric_summary"))
+    unit = _first_unit(row)
+    percent = _scale_percent(row.get("numeric_summary"), bool(unit and "%" in unit))
+    numbers, endpoints = _summary_text(row.get("numeric_summary"), percent=percent)
+    if unit.casefold() == "date":
+        numbers = ""
+        endpoints = set()
+        unit = ""
+    if percent and unit:
+        rest = unit.replace("%", "").strip()
+        if rest and numbers:
+            numbers = f"{numbers} {rest}"
+        unit = ""
+    elif unit:
+        unit = unit.replace("'000", "").replace("’000", "").strip()
+    dates, notes, loose = _side_notes(row, percent=percent, endpoints=endpoints)
+    if _blank_figure(numbers):
+        numbers = ""
+    if not numbers and loose:
+        numbers = loose[0]
+        notes = loose[1:] + notes
     scale = ""
-    if numbers:
+    if numbers or any(char.isdigit() for note in notes for char in note):
         hints = row.get("hints") if isinstance(row.get("hints"), dict) else {}
         scale = scale_display(str(hints.get("scale") or ""))
-    extras = _side_cells(row)
-    head = f"{label}: {numbers}" if numbers else label
-    tail = [part for part in (scale, *extras) if part]
-    line = head if not tail else f"{head}. " + ". ".join(tail)
-    if not line.endswith("."):
-        line += "."
-    return line
+    measure = " ".join(part for part in (scale, unit) if part)
+    span = _date_span(dates)
+    if numbers:
+        parts = [numbers, measure, span, *notes]
+    else:
+        parts = [*notes, measure, span]
+    if not any(parts):
+        return None
+    body = ", ".join([part for part in parts if part])
+    if not body:
+        return None
+    return f"- {label} — {body}"
 
 
-def _summary_clause(summary: Any) -> str:
+def _scale_percent(summary: Any, percent: bool) -> bool:
+    """Scale the row only when every stored figure is a fraction."""
+    if not percent:
+        return False
     if not isinstance(summary, dict):
-        return ""
-    first = _shown(summary.get("first"))
-    last = _shown(summary.get("last"))
-    if summary.get("constant") is True or (first is not None and first == last):
-        return first or ""
+        return True
+    for key in ("first", "last", "minimum", "maximum"):
+        folded = fold_decimal(summary.get(key))
+        if folded is None:
+            continue
+        if abs(Decimal(folded)) > 1:
+            return False
+    return True
+
+
+def _zero_end(text: str | None) -> bool:
+    return text in (None, "0", "0%")
+
+
+def _blank_figure(numbers: str) -> bool:
+    head, _, _rest = numbers.partition(" ")
+    return head in ("", "0", "0%")
+
+
+def _summary_text(summary: Any, *, percent: bool) -> tuple[str, set[str]]:
+    if not isinstance(summary, dict):
+        return "", set()
+    shown = {
+        key: display_cached(summary.get(key), percent=percent)
+        for key in ("first", "last", "minimum", "maximum")
+    }
+    ends = {text for text in shown.values() if text}
+    first, last = shown["first"], shown["last"]
+    minimum, maximum = shown["minimum"], shown["maximum"]
+    if summary.get("constant") is True or (ends and len(ends) == 1):
+        return first or last or minimum or maximum or "", ends
+    if (first is not None or last is not None) and _zero_end(first) and _zero_end(last):
+        if _zero_end(minimum) and _zero_end(maximum):
+            return "0", ends
+        if not _zero_end(maximum):
+            text = f"до {maximum}"
+            if not _zero_end(minimum) and minimum != maximum:
+                text += f", минимум {minimum}"
+            return text, ends
+        if not _zero_end(minimum):
+            return f"минимум {minimum}", ends
+        return "0", ends
     if first and last:
         text = f"с {first} по {last}"
     elif first:
@@ -296,46 +325,76 @@ def _summary_clause(summary: Any) -> str:
     else:
         text = ""
     extra: list[str] = []
-    minimum = _shown(summary.get("minimum"))
-    maximum = _shown(summary.get("maximum"))
-    if minimum is not None and minimum != first:
+    if minimum not in (None, first, last):
         extra.append(f"минимум {minimum}")
-    if maximum is not None and maximum != last:
+    if maximum not in (None, first, last):
         extra.append(f"максимум {maximum}")
-    if not extra:
-        return text
-    if not text:
-        return ", ".join(extra)
-    return f"{text}, " + ", ".join(extra)
+    if extra and text:
+        text = f"{text}, " + ", ".join(extra)
+    elif extra:
+        text = ", ".join(extra)
+    return text, ends
 
 
-def _side_cells(row: dict[str, Any]) -> list[str]:
+def _first_unit(row: dict[str, Any]) -> str:
+    for cell in _cells(row):
+        if cell.get("role") != "unit":
+            continue
+        text = str(cell.get("cached_value") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _side_notes(
+    row: dict[str, Any], *, percent: bool, endpoints: set[str]
+) -> tuple[list[str], list[str], list[str]]:
+    dates: list[str] = []
+    notes: list[str] = []
+    loose: list[str] = []
+    for cell in _cells(row):
+        if cell.get("role") == "unit":
+            continue
+        cached = str(cell.get("cached_value") or "").strip()
+        if not cached or cached.casefold() == "none":
+            continue
+        if _DATE.match(cached):
+            dates.append(cached)
+            continue
+        plain = display_cached(cached, percent=False)
+        as_series = display_cached(cached, percent=percent)
+        if plain in ("0", "1") or as_series in ("0", "1", "0%", "100%"):
+            continue
+        if (as_series is not None and as_series in endpoints) or (
+            plain is not None and plain in endpoints
+        ):
+            continue
+        header = str(cell.get("header") or "").strip()
+        text = as_series if percent and as_series is not None else plain
+        if text is None:
+            text = cached
+        if plain is not None and not header:
+            if endpoints:
+                continue
+            loose.append(text)
+            continue
+        notes.append(f"{header}: {text}" if header else text)
+    return dates, notes, loose
+
+
+def _date_span(dates: list[str]) -> str:
+    if len(dates) >= 2:
+        return f"{dates[0]}–{dates[1]}"
+    if dates:
+        return dates[0]
+    return ""
+
+
+def _cells(row: dict[str, Any]) -> list[dict[str, Any]]:
     cells = row.get("cells")
     if not isinstance(cells, list):
         return []
-    parts: list[str] = []
-    for cell in cells:
-        if not isinstance(cell, dict):
-            continue
-        cached = _shown(cell.get("cached_value"))
-        if cached is None:
-            continue
-        if cell.get("role") == "unit":
-            parts.append(f"Единица: {cached}")
-            continue
-        header = str(cell.get("header") or "").strip()
-        if header:
-            parts.append(f"{header}: {cached}")
-    return parts
-
-
-def _shown(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    return text
+    return [cell for cell in cells if isinstance(cell, dict)]
 
 
 def _positive_count(value: Any) -> int | None:

@@ -713,7 +713,6 @@ def _book_document() -> dict:
                         "label": "Inputs Time Dependent",
                         "kind": "abstract",
                         "disposition": "header",
-                        "values": ["1", "2", "3"],
                     },
                     {
                         "label": "CPI",
@@ -722,20 +721,158 @@ def _book_document() -> dict:
                         "concept_id": "secret-concept",
                         "hints": {"scale": "m"},
                         "numeric_summary": {
-                            "constant": False,
+                            "constant": True,
                             "first": "0.02",
-                            "last": "0.08",
-                            "minimum": "0.01",
-                            "maximum": "0.09",
+                            "last": "0.02",
+                            "minimum": "0.02",
+                            "maximum": "0.02",
                             "n": 3,
                         },
                         "cells": [{"role": "unit", "cached_value": "%", "addr": "B1"}],
                         "values": ["0.02", "0.05", "0.08"],
                     },
                     {
+                        "label": "Ставка",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "7.927055656909944E-2",
+                            "last": "7.927055656909944E-2",
+                            "minimum": "7.927055656909944E-2",
+                            "maximum": "7.927055656909944E-2",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%"}],
+                    },
+                    {
+                        "label": "Поток",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "0",
+                            "last": "0",
+                            "minimum": "0",
+                            "maximum": "8168.3204057963",
+                        },
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {"role": "total", "cached_value": "99999"},
+                        ],
+                    },
+                    {
+                        "label": "Срок",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "1",
+                            "last": "1",
+                            "minimum": "1",
+                            "maximum": "1",
+                        },
+                    },
+                    {
+                        "label": "Доля",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "0",
+                            "last": "3.5545123789273241",
+                            "minimum": "0",
+                            "maximum": "3.5545123789",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%"}],
+                    },
+                    {
+                        "label": "Годовых",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "3.5000000000000003E-2",
+                            "last": "3.5000000000000003E-2",
+                            "minimum": "0.035",
+                            "maximum": "0.035",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "% p.a."}],
+                    },
+                    {
+                        "label": "Долг",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {"role": "value", "cached_value": "60000"},
+                            {
+                                "role": "value",
+                                "header": "Gearing",
+                                "cached_value": "0.60060060060060061",
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Выбор",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "CPI",
+                            "last": "CPI",
+                        },
+                        "cells": [{"role": "value", "header": "Live Case", "cached_value": "CPI"}],
+                    },
+                    {
+                        "label": "Доходность",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "cells": [
+                            {"role": "unit", "cached_value": "%"},
+                            {
+                                "role": "value",
+                                "header": "IRR",
+                                "cached_value": "7.927055656909944E-2",
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Ценность",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {
+                                "role": "value",
+                                "header": "Target IRR",
+                                "cached_value": "11470.633594198856",
+                            },
+                        ],
+                    },
+                    {
                         "label": "Пустая строка",
                         "kind": "fact",
                         "disposition": "abstained",
+                    },
+                    {
+                        "label": "Checks",
+                        "kind": "abstract",
+                        "disposition": "header",
+                    },
+                    {
+                        "label": "Spare",
+                        "kind": "helper",
+                        "disposition": "excluded",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "99",
+                            "last": "99",
+                            "minimum": "99",
+                            "maximum": "99",
+                        },
                     },
                 ],
             }
@@ -1388,27 +1525,40 @@ async def test_ungrounded_overview_publishes_the_book_passport() -> None:
     assert snap.values["citations"] == []
     for piece in (
         "rvi-project-finance.xlsx",
-        "10219",
-        "20",
-        "CPI",
-        "0.02",
-        "0.08",
-        "минимум 0.01",
-        "максимум 0.09",
-        "млн.",
-        "Единица: %",
-        "Inputs Time Dependent",
-        "Пустая строка",
-        "Назовите подписи.",
-        "Предупреждение: cache gap.",
+        "## Inputs Time Dependent",
+        "- CPI — 2%, млн.",
+        "- Ставка — 7.93%",
+        "- Поток — до 8 168.32, тыс. EUR",
+        "- Срок — 1",
+        "- Доля — с 0 по 3.55, %",
+        "- Годовых — 3.5% p.a.",
+        "- Долг — 60 000, тыс. EUR, Gearing: 0.6",
+        "- Выбор — Live Case: CPI",
+        "- Доходность — IRR: 7.93%",
+        "- Ценность — Target IRR: 11 470.63, тыс. EUR",
     ):
         assert piece in draft
-    assert "secret-concept" not in draft
-    assert "graph.json" not in draft
-    assert "0.5" not in draft
-    assert "0.05" not in draft
-    assert "Пустая строка: 0" not in draft
-    assert "Пустая строка." in draft
+    for piece in (
+        "10219",
+        "Формул",
+        "Предупреждение",
+        "Единица",
+        "Назовите подписи",
+        "secret-concept",
+        "graph.json",
+        "0.5",
+        "0.02",
+        "E-",
+        "Spare",
+        "99",
+        "Checks",
+        "Пустая строка",
+        "с 0 по 0",
+        "с 0%",
+        "99 999",
+        "EUR'000",
+    ):
+        assert piece not in draft
     about = _seen(model, "about")
     assert len(about) == 1
     assert "не открывает одну строку" in about[0]["system"]
