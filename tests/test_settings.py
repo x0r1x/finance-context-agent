@@ -39,7 +39,6 @@ _KEYS = (
     "OBSERVATION_CAP",
     "CATALOG_SEARCH_LIMIT",
     "PRECEDENT_DEPTH",
-    "MAX_NEEDLES",
     "MAX_DEPENDENT_ROWS",
     "DEPENDENT_OBSERVATION_LIMIT",
     "LANGGRAPH_STRICT_MSGPACK",
@@ -73,7 +72,6 @@ def test_defaults_match_today(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.observation_cap == 48
     assert settings.catalog_search_limit == 32
     assert settings.precedent_depth == 2
-    assert settings.max_needles == 4
     assert settings.max_dependent_rows == 4
     assert settings.dependent_observation_limit == 8
     assert settings.langgraph_strict_msgpack is True

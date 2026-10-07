@@ -11,6 +11,7 @@ from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
 from finance_context_agent.questions import question_needles
 from finance_context_agent.session import interrupts_of
+from finance_context_agent.settings import Settings
 from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
     ByQuestion,
@@ -27,8 +28,8 @@ from tests.fakes import (
 )
 
 
-def _graph(parser: FakeParser, model) -> object:
-    return build_graph(parser, model, InMemorySaver())
+def _graph(parser: FakeParser, model, settings: Settings | None = None) -> object:
+    return build_graph(parser, model, InMemorySaver(), settings)
 
 
 async def _run(graph, question: str, thread: str = "thread-1", job: str = "job-1"):
@@ -432,17 +433,18 @@ async def test_russian_debt_word_is_not_rewritten_to_debt() -> None:
     rows = [catalog_row(f"row-{index}", f"Debt {index}") for index in range(8)]
     parser.pages[("job-1", "debt")] = page(rows, total=26)
     model = ScriptedModel()
-    model.push("plan", plan(["Какой долг"]))
-    model.push("plan", plan(["Какой долг"]))
     graph = _graph(parser, model)
     await _run(graph, "Какой долг?")
     snap = await graph.aget_state(run_config("thread-1"))
     queries = [call["q"] for call in parser.catalog_calls]
-    assert queries == ["долг", "долг"]
+    assert queries == ["долг"]
     assert "Debt" not in queries
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
+    assert parser.context_calls == []
+    assert _seen(model, "about") == []
+    assert _seen(model, "plan") == []
 
 
 @pytest.mark.asyncio
@@ -665,15 +667,80 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
     model = ScriptedModel()
-    model.push("plan", plan(["ZZZ"]))
-    model.push("plan", plan(["ZZZ"]))
+    model.push("about", {"about": "row"})
     graph = _graph(parser, model)
     await _run(graph, "ZZZ?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
-    assert len(parser.catalog_calls) == 2
+    assert len(parser.catalog_calls) == 1
+    assert parser.catalog_calls[0]["q"] == "ZZZ"
     assert parser.observation_calls == []
+    assert _seen(model, "plan") == []
+    assert len(_seen(model, "about")) == 1
+    assert parser.context_calls == []
+    parser.context = _book_document()
+    model.push("about", {"about": "book"})
+    await graph.ainvoke(
+        Command(resume="Расскажи по модель ! дай саммари по ней"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    resumed = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(resumed)
+    assert resumed.values["satisfactory"] is True
+    assert resumed.values["gaps"] == []
+    assert "CPI" in resumed.values["draft"]
+    assert "Не смог выбрать строку" not in resumed.values["draft"]
+
+
+def _book_document() -> dict:
+    return {
+        "meta": {"source_filename": "rvi-project-finance.xlsx"},
+        "workbook": {
+            "sheets": ["Cover Page", "Top Shortcuts", "PF Model"],
+            "formula_count": 10219,
+            "missing_cached_values": 20,
+        },
+        "warnings": ["cache gap"],
+        "mapping_stats": {"mapped": 1, "concept_coverage": 0.5},
+        "graph": {"artifact": "graph.json"},
+        "blocks": [
+            {
+                "sheet": "PF Model",
+                "rows": [
+                    {
+                        "label": "Inputs Time Dependent",
+                        "kind": "abstract",
+                        "disposition": "header",
+                        "values": ["1", "2", "3"],
+                    },
+                    {
+                        "label": "CPI",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "concept_id": "secret-concept",
+                        "hints": {"scale": "m"},
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "0.02",
+                            "last": "0.08",
+                            "minimum": "0.01",
+                            "maximum": "0.09",
+                            "n": 3,
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%", "addr": "B1"}],
+                        "values": ["0.02", "0.05", "0.08"],
+                    },
+                    {
+                        "label": "Пустая строка",
+                        "kind": "fact",
+                        "disposition": "abstained",
+                    },
+                ],
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -1245,14 +1312,38 @@ async def test_two_forks_pause_without_numbers() -> None:
 
 @pytest.mark.asyncio
 async def test_five_needles_asks_to_narrow() -> None:
+    labels = ("CFADS", "EBITDA", "DSCR", "IRR", "Debt")
     parser = FakeParser()
     parser.axes = year_axes()
+    for index, label in enumerate(labels, start=1):
+        key = f"row-{index}"
+        parser.pages[("job-1", label.casefold())] = page(
+            [catalog_row(key, label, axis=["forecast"])]
+        )
+        parser.observations[("job-1", key)] = [
+            observation(key, "", str(index), f"A{index}", label=label)
+        ]
     graph = _graph(parser, ScriptedModel())
     await _run(graph, "CFADS, EBITDA, DSCR, IRR, Debt")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(snap)
-    assert snap.values["user_question"] == "Назовите не больше четырёх."
-    assert parser.catalog_calls == []
+    assert not interrupts_of(snap)
+    assert snap.values["satisfactory"] is True
+    assert {item["row_key"] for item in snap.values["citations"]} == {
+        f"row-{index}" for index in range(1, 6)
+    }
+    assert {call["q"] for call in parser.catalog_calls} == set(labels)
+    assert "четырёх" not in (snap.values.get("draft") or "")
+    tight = FakeParser()
+    tight.axes = year_axes()
+    tight_graph = _graph(tight, ScriptedModel(), Settings(observation_cap=3))
+    await _run(tight_graph, "CFADS, EBITDA, DSCR, IRR, Debt", thread="thread-cap")
+    paused = await tight_graph.aget_state(run_config("thread-cap"))
+    assert interrupts_of(paused)
+    assert paused.values["user_question"] == (
+        "В один ответ входит не больше 3 наблюдений. Назовите меньше подписей."
+    )
+    assert "четырёх" not in paused.values["user_question"]
+    assert tight.catalog_calls == []
 
 
 @pytest.mark.asyncio
@@ -1269,12 +1360,74 @@ async def test_cover_question_pauses_without_catalog() -> None:
     assert parser.catalog_calls == []
     assert "P&L" in question
     assert "CFS" in question
-    assert "подписей" in question
+    assert "подписи" in question
     assert "CFADS" not in question
     assert "DSCR" not in question
     assert "IRR" not in question
     assert not any(char.isdigit() for char in question)
     assert _seen(model, "plan") == []
+    assert _seen(model, "about") == []
+
+
+@pytest.mark.asyncio
+async def test_ungrounded_overview_publishes_the_book_passport() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.context = _book_document()
+    question = "Расскажи по модели ! дай саммари по ней"
+    model = ScriptedModel()
+    model.push("about", {"about": "book"})
+    model.push("about", {"about": "book"})
+    graph = _graph(parser, model)
+    await _run(graph, question)
+    snap = await graph.aget_state(run_config("thread-1"))
+    draft = snap.values["draft"]
+    assert not interrupts_of(snap)
+    assert snap.values["satisfactory"] is True
+    assert snap.values["gaps"] == []
+    assert snap.values["citations"] == []
+    for piece in (
+        "rvi-project-finance.xlsx",
+        "10219",
+        "20",
+        "CPI",
+        "0.02",
+        "0.08",
+        "минимум 0.01",
+        "максимум 0.09",
+        "млн.",
+        "Единица: %",
+        "Inputs Time Dependent",
+        "Пустая строка",
+        "Назовите подписи.",
+        "Предупреждение: cache gap.",
+    ):
+        assert piece in draft
+    assert "secret-concept" not in draft
+    assert "graph.json" not in draft
+    assert "0.5" not in draft
+    assert "0.05" not in draft
+    assert "Пустая строка: 0" not in draft
+    assert "Пустая строка." in draft
+    about = _seen(model, "about")
+    assert len(about) == 1
+    assert "не открывает одну строку" in about[0]["system"]
+    assert "Расскажи" not in about[0]["system"]
+    assert "саммари" not in about[0]["system"]
+    assert about[0]["user"] == question
+    assert _seen(model, "plan") == []
+    phrase = "Расскажи дай саммари ней"
+    assert [call["q"] for call in parser.catalog_calls].count(phrase) == 1
+    assert parser.observation_calls == []
+    assert parser.context_calls == ["job-1"]
+    await _run(graph, question)
+    again = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(again)
+    assert again.values["satisfactory"] is True
+    assert again.values["gaps"] == []
+    assert again.values["draft"] == draft
+    assert [call["q"] for call in parser.catalog_calls].count(phrase) == 2
+    assert parser.context_calls == ["job-1", "job-1"]
 
 
 @pytest.mark.asyncio

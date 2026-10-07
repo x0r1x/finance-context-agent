@@ -14,12 +14,14 @@ from finance_context_agent.llm import JsonModel, SchemaError
 from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import (
+    about_messages,
     answer_messages,
     plan_messages,
     without_account_code,
 )
 from finance_context_agent.questions import (
     asks_how,
+    book_overview,
     cover_question,
     is_cover,
     question_needles,
@@ -27,6 +29,8 @@ from finance_context_agent.questions import (
 from finance_context_agent.settings import Settings
 
 _TOKEN_EDGE = "?.!,;:«»\"'[]"
+_LOOKUP_TOKENS = frozenset({"какой", "какая", "какое", "какие"})
+_MISSING_ROW = "Такой строки нет. Назовите подпись иначе или выберите другую метрику."
 
 
 class AgentState(TypedDict, total=False):
@@ -126,12 +130,12 @@ def build_graph(
         named = periods_from_question(text, axes)
         if reply and not named:
             named = periods_from_question(question, axes)
-        if needles and (not reply or state.get("label_reply")):
-            if len(needles) > settings.max_needles:
-                return _ask(state, "Назовите не больше четырёх.", settings=settings) | {
-                    "label_reply": True
-                }
-            return _question_plan(state, needles, named, settings) | {"label_reply": False}
+        label_turn = bool(state.get("label_reply")) or state.get("user_question") == _MISSING_ROW
+        if needles and (not reply or label_turn):
+            blocked = _label_cap(state, len(needles), settings)
+            if blocked:
+                return blocked
+            return _question_plan(state, needles, named) | {"label_reply": False}
         if not reply and is_cover(question):
             return _ask(state, cover_question(state.get("summary") or {}), settings=settings) | {
                 "label_reply": True
@@ -144,12 +148,15 @@ def build_graph(
         model_needles = [
             str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()
         ]
+        blocked = _label_cap(state, len(model_needles), settings)
+        if blocked:
+            return blocked
         periods = named or list(parsed.get("periods") or [])
         return {
             "content_steps": state.get("content_steps", 0) + 1,
             "plan": {
                 "question_type": parsed.get("question_type") or "lookup",
-                "needles": model_needles[: settings.max_needles],
+                "needles": model_needles,
                 "periods": periods,
                 "trace": parsed.get("trace") or "none",
                 "source": "model",
@@ -194,6 +201,8 @@ def build_graph(
         except ParserError as exc:
             return _terminal_or_raise(exc)
         pages = [narrow_page(needle, page) for needle, page in pages]
+        if plan_body.get("source") == "question" and _pages_empty(pages):
+            return await _code_miss(state, model, settings, parser)
         if not pages:
             return _miss(state, "Пустой поиск.", settings)
         if (plan_body.get("question_type") or "lookup") == "compose":
@@ -534,12 +543,54 @@ def _depth(plan_body: dict[str, Any], settings: Settings) -> int:
     return 0
 
 
+def _pages_empty(pages: list[tuple[str, dict[str, Any]]]) -> bool:
+    return all(int(page.get("total") or 0) == 0 for _needle, page in pages)
+
+
+def _lookup_shaped(question: str) -> bool:
+    if asks_how(question) or "сравни" in question.casefold():
+        return True
+    return any(
+        raw.strip(_TOKEN_EDGE).casefold() in _LOOKUP_TOKENS for raw in question.split()
+    )
+
+
+async def _code_miss(
+    state: dict[str, Any], model: JsonModel, settings: Settings, parser: Any
+) -> dict[str, Any]:
+    """A code plan grounded nothing. A row-shaped question pauses; the rest ask book or row."""
+    question = str(state.get("question") or "")
+    if _lookup_shaped(question):
+        return _ask(state, _MISSING_ROW, settings=settings)
+    system, user = about_messages(question)
+    try:
+        parsed = await model.complete_json(role="about", system=system, user=user)
+    except SchemaError:
+        parsed = {}
+    if isinstance(parsed, dict) and parsed.get("about") == "book":
+        try:
+            document = await parser.get_context(str(state.get("job_id") or ""))
+        except ParserError as exc:
+            return _terminal_or_raise(exc)
+        return {
+            "draft": book_overview(document),
+            "gaps": [],
+            "satisfactory": True,
+            "citations": [],
+            "terminal": "done",
+            "awaiting": "",
+            "search_again": False,
+            "reload": False,
+        }
+    return _ask(state, _MISSING_ROW, settings=settings) | {"label_reply": True}
+
+
 def _miss(state: dict[str, Any], note: str, settings: Settings) -> dict[str, Any]:
     misses = state.get("search_misses", 0) + 1
     if misses >= 2:
         return _ask(
             state,
-            "Такой строки нет. Назовите подпись иначе или выберите другую метрику.",
+            _MISSING_ROW,
             settings=settings,
         ) | {
             "search_misses": misses,
@@ -685,11 +736,26 @@ def _series_without_period(observations: list[dict[str, Any]]) -> bool:
     return any(count > 1 for count in counts.values())
 
 
+def _label_cap(
+    state: dict[str, Any], count: int, settings: Settings
+) -> dict[str, Any] | None:
+    """One answer holds observation_cap observations, so it cannot open more labels."""
+    if count <= settings.observation_cap:
+        return None
+    return _ask(
+        state,
+        (
+            f"В один ответ входит не больше {settings.observation_cap} наблюдений. "
+            "Назовите меньше подписей."
+        ),
+        settings=settings,
+    ) | {"label_reply": True}
+
+
 def _question_plan(
     state: dict[str, Any],
     needles: list[str],
     periods: list[dict[str, str]],
-    settings: Settings,
 ) -> dict[str, Any]:
     question = str(state.get("question") or "")
     reply = str(state.get("human_reply") or "")
@@ -707,7 +773,7 @@ def _question_plan(
         "content_steps": state.get("content_steps", 0) + 1,
         "plan": {
             "question_type": question_type,
-            "needles": needles[: settings.max_needles],
+            "needles": needles,
             "periods": periods,
             "trace": "precedents" if why else "none",
             "source": "question",

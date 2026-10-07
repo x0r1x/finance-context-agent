@@ -53,6 +53,11 @@ class Trace(StrEnum):
     dependents = "dependents"
 
 
+class AboutTarget(StrEnum):
+    book = "book"
+    row = "row"
+
+
 def _present_period_text(value: str) -> str:
     """A required string still comes back as punctuation when the field is absent."""
     text = value.strip()
@@ -121,7 +126,12 @@ class Answer(BaseModel):
     citations: list[Citation]
 
 
-_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer}
+class About(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    about: AboutTarget
+
+
+_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer, "about": About}
 _SCHEMA_DROP = {"title", "default", "$defs", "$schema", "$comment"}
 
 

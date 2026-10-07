@@ -1,4 +1,4 @@
-"""Prompts for the planner and the answer."""
+"""Prompts for the planner, the book-or-row check, and the answer."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
         "Ты выбираешь подписи строк и периоды для финансового вопроса. "
         "Чисел ячеек у тебя нет, row_key не выдумывай. "
         "Верни JSON с ключами question_type (lookup, compare, explain или compose), "
-        "needles (массив подстрок подписи, до четырёх — по одной на метрику), "
+        "needles (массив подписей, по одной на метрику, столько, сколько названо в вопросе), "
         "periods (массив объектов period_key, year, phase_year или flag) и "
         "trace (none, precedents или dependents). "
         "precedents — вопрос «почему» или «из чего». dependents — «на что влияет». "
@@ -42,6 +42,16 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
         ensure_ascii=False,
     )
     return system, user
+
+
+def about_messages(question: str) -> tuple[str, str]:
+    """The catalog grounded nothing. book is the whole workbook; row is a missing label."""
+    system = (
+        "Каталог не содержит подписи из вопроса. "
+        "book — вопрос не открывает одну строку и говорит о книге целиком. "
+        "row — вопрос требует открыть одну строку, а её подписи в каталоге нет."
+    )
+    return system, question
 
 
 def without_account_code(value: Any) -> Any:

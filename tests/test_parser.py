@@ -33,6 +33,8 @@ class _Script:
             body = {"nodes": []}
         elif url.endswith("/summary"):
             body = {"coverage": {}}
+        elif url.endswith("/context.json"):
+            body = {"meta": {"source_filename": "model.xlsx"}, "blocks": []}
         elif url.endswith("/context-jobs?status=succeeded"):
             body = [{"job_id": "job-1", "source_filename": "model.xlsx"}]
         elif url.endswith("/readyz"):
@@ -139,4 +141,11 @@ async def test_head_does_not_send_a_cached_etag() -> None:
     etag = await parser.head_catalog_etag("job-1")
     assert etag == '"book"'
     assert "if-none-match" not in {key.lower() for key in script.calls[-1].headers}
+    document = await parser.get_context("job-1")
+    assert document["meta"]["source_filename"] == "model.xlsx"
+    assert str(script.calls[-1].url).endswith("/v1/context-jobs/job-1/context.json")
+    assert "if-none-match" not in {key.lower() for key in script.calls[-1].headers}
+    await parser.get_context("job-1")
+    assert "if-none-match" not in {key.lower() for key in script.calls[-1].headers}
+    assert not parser.remembers("/v1/context-jobs/job-1/context.json", [])
     await parser.aclose()

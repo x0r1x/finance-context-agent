@@ -64,6 +64,16 @@ class ParserClient:
         body, etag = await self._get(f"/v1/context-jobs/{job_id}/summary", [])
         return body, etag
 
+    async def get_context(self, job_id: str) -> dict[str, Any]:
+        """Whole context document. Too large to keep in the slice cache."""
+        url = f"{self._base}/v1/context-jobs/{job_id}/context.json"
+        response = await self._client.get(url)
+        self._raise_for_status(response)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ParserError(502, "bad_context")
+        return body
+
     async def head_catalog_etag(self, job_id: str) -> str:
         url = self._full(f"/v1/context-jobs/{job_id}/catalog", [("limit", "1")])
         response = await self._client.request("HEAD", url)
