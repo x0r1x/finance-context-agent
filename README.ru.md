@@ -17,6 +17,7 @@
 - [Docker](#docker)
 - [Вопрос](#вопрос)
 - [HTTP API](#http-api)
+- [Чаты](#чаты)
 - [Когда ответ принят](#когда-ответ-принят)
 - [Сессии](#сессии)
 - [Проверка](#проверка)
@@ -112,7 +113,7 @@ curl -sS http://127.0.0.1:8090/v1/chat/completions \
   }'
 ```
 
-`job_id` совпадает с `^[A-Za-z0-9._-]{1,128}$`. `thread_id` совпадает с `^[A-Za-z0-9_-]{1,255}$`. Без `thread_id` агент создаёт UUID и возвращает его. Без `job_id` у нового диалога агент перечисляет готовые книги по имени файла и ждёт:
+`job_id` совпадает с `^[A-Za-z0-9._-]{1,128}$`. `thread_id` совпадает с `^[A-Za-z0-9_-]{1,255}$`. Без `thread_id` агент выводит устойчивый id из первого сообщения пользователя и необязательного поля `user`: `c` и 32 hex-символа SHA-256. То же открытие даёт тот же id. Поздний запрос, в котором уже есть ответ ассистента, продолжает этот диалог. То же первое сообщение без ответа ассистента повторяет открытую паузу и не отвечает на неё. Два чата с одним и тем же первым текстом делят один диалог, пока не пришлют `thread_id` или разное поле `user`. Без `job_id` у нового диалога агент перечисляет готовые книги по имени файла и ждёт:
 
 ```text
 Какую книгу открыть?
@@ -174,19 +175,19 @@ curl -sS http://127.0.0.1:8090/v1/chat/completions \
 | У выбранных строк период не один | `Период не один на всех выбранных строках. Назовите ключ.` |
 | Наблюдения обрезаны, а период не назван | `Ряд обрезан лимитом 48. Назовите период, среднее по обрезанному ряду не считается.` |
 
-`stream: true` — это 400 `stream_unsupported`. Поле `model` в запросе игнорируется.
+`stream: true` дожидается конца хода и отвечает `text/event-stream`: один chunk, в `delta.content` весь текст паузы или ответа, второй chunk с пустым `delta` и `finish_reason` `stop`, затем строка `data: [DONE]`. Переносы текста остаются внутри JSON. Это не потоковая выдача токенов модели. `stream: false` — JSON выше. Запрос, который не дошёл до хода, по-прежнему возвращает `{"error": "<code>"}`, в том числе при `stream: true`. Поле `model` в запросе игнорируется. Заголовок `Authorization` игнорируется.
 
 ## HTTP API
 
 - `GET /healthz` — живость процесса.
 - `GET /readyz` — Redis и парсер. 503, если недоступен любой из них.
+- `GET /v1/models` — одна модель с id `finance-context-agent`.
 - `POST /v1/chat/completions` — один ход или продолжение паузы.
 
 Тело ошибки всегда `{"error": "<code>"}`.
 
 | code | HTTP |
 | --- | --- |
-| `stream_unsupported` | 400 |
 | `messages_required` | 400 |
 | `last_message_not_user` | 400 |
 | `user_message_required` | 400 |
@@ -201,6 +202,29 @@ curl -sS http://127.0.0.1:8090/v1/chat/completions \
 Книга, которая ещё собирается, — обычный ответ 200. Текст ассистента: `Книга ещё собирается.`, `satisfactory` ложно. Неизвестный id джобы — `Книга не найдена.`, тоже 200. Готовых книг для выбора нет: `Готовых книг нет.` Сеть, таймаут или HTTP 5xx парсера или модели — 503 `upstream_unavailable`. Клиент парсера ждёт 15 секунд (`PARSER_TIMEOUT_SEC`). Клиент модели ждёт 60 секунд (`LLM_TIMEOUT_SEC`).
 
 `gaps` называет, что не сошлось. Примеры: `report_not_ready`, `not_found`, `number:…`, `cell:…`, `scale:…`, `precedent`, `compare_sides`, `schema`, `clarify`. Цитата несёт `row_key`, `period_id`, `cell` и, когда они есть, `value` и `value_status` (`cached`, `empty`, `zero_explicit`, `not_applicable`). `steps` записывает поиск и вызовы наблюдений этого хода.
+
+## Чаты
+
+Open WebUI и LibreChat вызывают агента как сервер Chat Completions. Базовый URL — корень `/v1`: с хоста `http://127.0.0.1:8090/v1`, из контейнера чата к опубликованному порту `http://host.docker.internal:8090/v1`. Ключ API агент не проверяет.
+
+Open WebUI: Admin → Connections → OpenAI. Тот же URL, Provider Default, ключ любой. После успешного Verify Connection поле Model IDs можно оставить пустым или вписать `finance-context-agent`. Заголовки диалогов оставьте на другой модели: просьба о заголовке для этого агента — вопрос по книге.
+
+LibreChat, в `librechat.yaml`:
+
+```yaml
+endpoints:
+  custom:
+    - name: "Finance"
+      apiKey: "local"
+      baseURL: "http://host.docker.internal:8090/v1"
+      models:
+        default: ["finance-context-agent"]
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: "Finance"
+```
+
+`titleConvo: false` оставляет имя диалога в LibreChat. Иначе отдельный запрос заголовка открывает ещё один ход агента.
 
 ## Когда ответ принят
 
@@ -237,7 +261,7 @@ JOB_ID=<job_id парсера> bash scripts/run.sh 'Какой DSCR в 2030?'
 THREAD_ID=<thread_id из summary.txt> JOB_ID=<job_id парсера> bash scripts/ask.sh 'Наблюдённый'
 ```
 
-`bash scripts/run.sh` проверяет `GET /healthz`, `GET /readyz` (отвечают и Redis, и парсер) и ответы 400, которые возвращаются до модели: `stream_unsupported`, `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id` и `bad_job_id` из тела и из `X-Job-Id`.
+`bash scripts/run.sh` проверяет `GET /healthz`, `GET /readyz` (отвечают и Redis, и парсер) и ответы 400, которые возвращаются до блокировки и до модели: `messages_required`, `last_message_not_user`, `user_message_required`, `bad_thread_id` и `bad_job_id` из тела и из `X-Job-Id`.
 
 Вопрос пишет `completion.json`. Проверка требует HTTP 200, `object` `chat.completion`, `model` `finance-context-agent` и `finish_reason` `stop`. `awaiting_user: true` — успешная проверка. Текст ассистента — это пауза, а `satisfactory` остаётся за книгой и моделью. Третья команда шлёт следующее сообщение пользователя на этот `thread_id`. Сервер сам решает, продолжение это паузы или новый ход.
 
@@ -245,7 +269,7 @@ THREAD_ID=<thread_id из summary.txt> JOB_ID=<job_id парсера> bash scrip
 
 ```text
 healthz.json  readyz.json  summary.txt
-error-stream.json  error-messages.json  error-role.json  error-empty.json
+error-messages.json  error-role.json  error-empty.json
 error-thread.json  error-job.json  error-header-job.json
 ask.json  completion.json
 ```

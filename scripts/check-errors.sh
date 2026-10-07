@@ -31,9 +31,6 @@ expect_error() {
   fi
 }
 
-expect_error error-stream \
-  '{"stream":true,"messages":[{"role":"user","content":"x"}]}' \
-  stream_unsupported
 expect_error error-messages '{}' messages_required
 expect_error error-role \
   '{"messages":[{"role":"assistant","content":"x"}]}' \

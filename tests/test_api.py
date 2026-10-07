@@ -1,6 +1,7 @@
 import asyncio
+import json
 import logging
-from uuid import UUID
+import re
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,6 +11,7 @@ from finance_context_agent.app import create_app
 from finance_context_agent.graph import build_graph
 from finance_context_agent.lock import MemoryThreadLock
 from finance_context_agent.parser import ParserError
+from finance_context_agent.session import derived_thread_id
 from finance_context_agent.turn import run_config
 from tests.fakes import (
     FakeParser,
@@ -25,6 +27,7 @@ from tests.fakes import (
 
 THREAD = "thread-1"
 JOB = "job-1"
+_DERIVED = re.compile(r"^c[0-9a-f]{32}$")
 
 
 class GateModel:
@@ -81,9 +84,19 @@ async def test_healthz_ignores_the_parser_and_readyz_checks_both() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_and_non_user_message_are_rejected() -> None:
-    app, _graph = _app(FakeParser(), ScriptedModel())
+    parser = FakeParser()
+    parser.jobs = [{"job_id": JOB, "source_filename": "model.xlsx"}]
+    app, _graph = _app(parser, ScriptedModel())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-        streamed = await client.post("/v1/chat/completions", json=_payload("вопрос", stream=True))
+        models = await client.get("/v1/models")
+        streamed = await client.post(
+            "/v1/chat/completions",
+            json={
+                "stream": True,
+                "messages": [{"role": "user", "content": "Какой DSCR?"}],
+                "thread_id": THREAD,
+            },
+        )
         assistant = await client.post(
             "/v1/chat/completions",
             json={
@@ -92,8 +105,21 @@ async def test_stream_and_non_user_message_are_rejected() -> None:
                 "job_id": JOB,
             },
         )
-    assert streamed.status_code == 400
-    assert streamed.json()["error"] == "stream_unsupported"
+    assert models.status_code == 200
+    assert models.json()["data"][0]["id"] == "finance-context-agent"
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in streamed.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    assert streamed.text.rstrip().endswith("data: [DONE]")
+    content = frames[0]["choices"][0]["delta"]["content"]
+    assert "Какую книгу открыть?" in content
+    assert "model.xlsx" in content
+    assert "\n" not in streamed.text.split("data: ")[1].split("\n", 1)[0]
+    assert frames[1]["choices"][0]["finish_reason"] == "stop"
     assert assistant.status_code == 400
     assert assistant.json()["error"] == "last_message_not_user"
 
@@ -103,6 +129,12 @@ async def test_missing_thread_id_is_minted() -> None:
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
+    question = "Какой DSCR в 2030?"
+    for _ in range(2):
+        model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
+        model.push(
+            "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
+        )
     model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
@@ -111,11 +143,27 @@ async def test_missing_thread_id_is_minted() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
             "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "Какой DSCR в 2030?"}], "job_id": JOB},
+            json={"messages": [{"role": "user", "content": question}], "job_id": JOB},
+        )
+        again = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": question}], "job_id": JOB},
+        )
+        other = await client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": question}],
+                "job_id": JOB,
+                "user": "alice",
+            },
         )
     body = response.json()
     assert response.status_code == 200
-    UUID(body["thread_id"])
+    assert _DERIVED.fullmatch(body["thread_id"])
+    assert body["thread_id"] == derived_thread_id(question)
+    assert again.json()["thread_id"] == body["thread_id"]
+    assert other.json()["thread_id"] == derived_thread_id(question, "alice")
+    assert other.json()["thread_id"] != body["thread_id"]
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["satisfactory"] is True
@@ -155,10 +203,47 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
             "/v1/chat/completions",
             json=_payload("ещё вопрос", job_id="job-2"),
         )
+        opened = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Какой DSCR?"}]},
+        )
+        pause = opened.json()["choices"][0]["message"]["content"]
+        seen = len(model.seen)
+        repeated = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Какой DSCR?"}]},
+        )
+        assert len(model.seen) == seen
+        model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
+        model.push(
+            "answer",
+            answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")]),
+        )
+        followed = await client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Какой DSCR?"},
+                    {"role": "assistant", "content": pause},
+                    {"role": "user", "content": "model.xlsx"},
+                ]
+            },
+        )
     assert mismatch.status_code == 409
     assert mismatch.json()["error"] == "job_mismatch"
     snap = await graph.aget_state(run_config(THREAD))
     assert snap.values["job_id"] == JOB
+    assert opened.status_code == 200
+    derived = opened.json()["thread_id"]
+    assert opened.json()["awaiting_user"] is True
+    assert "model.xlsx" in pause
+    assert repeated.json()["thread_id"] == derived
+    assert repeated.json()["choices"][0]["message"]["content"] == pause
+    assert followed.status_code == 200
+    assert followed.json()["thread_id"] == derived
+    assert followed.json()["satisfactory"] is True
+    derived_state = await graph.aget_state(run_config(derived))
+    assert derived_state.values["job_id"] == JOB
 
 
 @pytest.mark.asyncio

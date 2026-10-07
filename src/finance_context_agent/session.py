@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -31,16 +32,26 @@ def next_nodes(snapshot: Any) -> tuple[str, ...]:
     return tuple(getattr(snapshot, "next", ()) or ())
 
 
+def derived_thread_id(first_user_text: str, user: str | None = None) -> str:
+    """Stable dialog id for a client that resends the transcript."""
+    material = f"{(user or '').strip()}\0{first_user_text.strip()}"
+    return "c" + sha256(material.encode()).hexdigest()[:32]
+
+
+def ensure_same_job(snapshot: Any, job_id: str | None) -> None:
+    values = getattr(snapshot, "values", None) or {}
+    existing = values.get("job_id")
+    if existing and job_id and existing != job_id:
+        raise JobMismatchError(existing)
+
+
 def decide_input(snapshot: Any, text: str, job_id: str | None) -> Any:
     """Resume a pause, continue a crashed run, or start a turn.
 
     A crashed run (`next` set, no interrupt) is continued with ``None``.
     The new text is not treated as a new question.
     """
-    values = getattr(snapshot, "values", None) or {}
-    existing = values.get("job_id")
-    if existing and job_id and existing != job_id:
-        raise JobMismatchError(existing)
+    ensure_same_job(snapshot, job_id)
     if interrupts_of(snapshot):
         return Command(resume=text)
     if next_nodes(snapshot):
