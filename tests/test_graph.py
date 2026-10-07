@@ -11,6 +11,7 @@ from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
 from finance_context_agent.questions import question_needles
 from finance_context_agent.session import interrupts_of
+from finance_context_agent.settings import Settings
 from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
     ByQuestion,
@@ -27,8 +28,8 @@ from tests.fakes import (
 )
 
 
-def _graph(parser: FakeParser, model) -> object:
-    return build_graph(parser, model, InMemorySaver())
+def _graph(parser: FakeParser, model, settings: Settings | None = None) -> object:
+    return build_graph(parser, model, InMemorySaver(), settings)
 
 
 async def _run(graph, question: str, thread: str = "thread-1", job: str = "job-1"):
@@ -432,17 +433,18 @@ async def test_russian_debt_word_is_not_rewritten_to_debt() -> None:
     rows = [catalog_row(f"row-{index}", f"Debt {index}") for index in range(8)]
     parser.pages[("job-1", "debt")] = page(rows, total=26)
     model = ScriptedModel()
-    model.push("plan", plan(["Какой долг"]))
-    model.push("plan", plan(["Какой долг"]))
     graph = _graph(parser, model)
     await _run(graph, "Какой долг?")
     snap = await graph.aget_state(run_config("thread-1"))
     queries = [call["q"] for call in parser.catalog_calls]
-    assert queries == ["долг", "долг"]
+    assert queries == ["долг"]
     assert "Debt" not in queries
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
+    assert parser.context_calls == []
+    assert _seen(model, "about") == []
+    assert _seen(model, "plan") == []
 
 
 @pytest.mark.asyncio
@@ -665,15 +667,217 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
     model = ScriptedModel()
-    model.push("plan", plan(["ZZZ"]))
-    model.push("plan", plan(["ZZZ"]))
+    model.push("about", {"about": "row"})
     graph = _graph(parser, model)
     await _run(graph, "ZZZ?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
-    assert len(parser.catalog_calls) == 2
+    assert len(parser.catalog_calls) == 1
+    assert parser.catalog_calls[0]["q"] == "ZZZ"
     assert parser.observation_calls == []
+    assert _seen(model, "plan") == []
+    assert len(_seen(model, "about")) == 1
+    assert parser.context_calls == []
+    parser.context = _book_document()
+    model.push("about", {"about": "book"})
+    await graph.ainvoke(
+        Command(resume="Расскажи по модель ! дай саммари по ней"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    resumed = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(resumed)
+    assert resumed.values["satisfactory"] is True
+    assert resumed.values["gaps"] == []
+    assert "CPI" in resumed.values["draft"]
+    assert "Не смог выбрать строку" not in resumed.values["draft"]
+
+
+def _book_document() -> dict:
+    return {
+        "meta": {"source_filename": "rvi-project-finance.xlsx"},
+        "workbook": {
+            "sheets": ["Cover Page", "Top Shortcuts", "PF Model"],
+            "formula_count": 10219,
+            "missing_cached_values": 20,
+        },
+        "warnings": ["cache gap"],
+        "mapping_stats": {"mapped": 1, "concept_coverage": 0.5},
+        "graph": {"artifact": "graph.json"},
+        "blocks": [
+            {
+                "sheet": "PF Model",
+                "rows": [
+                    {
+                        "label": "Inputs Time Dependent",
+                        "kind": "abstract",
+                        "disposition": "header",
+                    },
+                    {
+                        "label": "CPI",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "concept_id": "secret-concept",
+                        "hints": {"scale": "m"},
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "0.02",
+                            "last": "0.02",
+                            "minimum": "0.02",
+                            "maximum": "0.02",
+                            "n": 3,
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%", "addr": "B1"}],
+                        "values": ["0.02", "0.05", "0.08"],
+                    },
+                    {
+                        "label": "Ставка",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "7.927055656909944E-2",
+                            "last": "7.927055656909944E-2",
+                            "minimum": "7.927055656909944E-2",
+                            "maximum": "7.927055656909944E-2",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%"}],
+                    },
+                    {
+                        "label": "Поток",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "0",
+                            "last": "0",
+                            "minimum": "0",
+                            "maximum": "8168.3204057963",
+                        },
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {"role": "total", "cached_value": "99999"},
+                        ],
+                    },
+                    {
+                        "label": "Срок",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "1",
+                            "last": "1",
+                            "minimum": "1",
+                            "maximum": "1",
+                        },
+                    },
+                    {
+                        "label": "Доля",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "0",
+                            "last": "3.5545123789273241",
+                            "minimum": "0",
+                            "maximum": "3.5545123789",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "%"}],
+                    },
+                    {
+                        "label": "Годовых",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "3.5000000000000003E-2",
+                            "last": "3.5000000000000003E-2",
+                            "minimum": "0.035",
+                            "maximum": "0.035",
+                        },
+                        "cells": [{"role": "unit", "cached_value": "% p.a."}],
+                    },
+                    {
+                        "label": "Долг",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {"role": "value", "cached_value": "60000"},
+                            {
+                                "role": "value",
+                                "header": "Gearing",
+                                "cached_value": "0.60060060060060061",
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Выбор",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "numeric_summary": {
+                            "constant": False,
+                            "first": "CPI",
+                            "last": "CPI",
+                        },
+                        "cells": [{"role": "value", "header": "Live Case", "cached_value": "CPI"}],
+                    },
+                    {
+                        "label": "Доходность",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "cells": [
+                            {"role": "unit", "cached_value": "%"},
+                            {
+                                "role": "value",
+                                "header": "IRR",
+                                "cached_value": "7.927055656909944E-2",
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Ценность",
+                        "kind": "fact",
+                        "disposition": "mapped",
+                        "hints": {"scale": "k"},
+                        "cells": [
+                            {"role": "unit", "cached_value": "EUR'000"},
+                            {
+                                "role": "value",
+                                "header": "Target IRR",
+                                "cached_value": "11470.633594198856",
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Пустая строка",
+                        "kind": "fact",
+                        "disposition": "abstained",
+                    },
+                    {
+                        "label": "Checks",
+                        "kind": "abstract",
+                        "disposition": "header",
+                    },
+                    {
+                        "label": "Spare",
+                        "kind": "helper",
+                        "disposition": "excluded",
+                        "numeric_summary": {
+                            "constant": True,
+                            "first": "99",
+                            "last": "99",
+                            "minimum": "99",
+                            "maximum": "99",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -1245,14 +1449,38 @@ async def test_two_forks_pause_without_numbers() -> None:
 
 @pytest.mark.asyncio
 async def test_five_needles_asks_to_narrow() -> None:
+    labels = ("CFADS", "EBITDA", "DSCR", "IRR", "Debt")
     parser = FakeParser()
     parser.axes = year_axes()
+    for index, label in enumerate(labels, start=1):
+        key = f"row-{index}"
+        parser.pages[("job-1", label.casefold())] = page(
+            [catalog_row(key, label, axis=["forecast"])]
+        )
+        parser.observations[("job-1", key)] = [
+            observation(key, "", str(index), f"A{index}", label=label)
+        ]
     graph = _graph(parser, ScriptedModel())
     await _run(graph, "CFADS, EBITDA, DSCR, IRR, Debt")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(snap)
-    assert snap.values["user_question"] == "Назовите не больше четырёх."
-    assert parser.catalog_calls == []
+    assert not interrupts_of(snap)
+    assert snap.values["satisfactory"] is True
+    assert {item["row_key"] for item in snap.values["citations"]} == {
+        f"row-{index}" for index in range(1, 6)
+    }
+    assert {call["q"] for call in parser.catalog_calls} == set(labels)
+    assert "четырёх" not in (snap.values.get("draft") or "")
+    tight = FakeParser()
+    tight.axes = year_axes()
+    tight_graph = _graph(tight, ScriptedModel(), Settings(observation_cap=3))
+    await _run(tight_graph, "CFADS, EBITDA, DSCR, IRR, Debt", thread="thread-cap")
+    paused = await tight_graph.aget_state(run_config("thread-cap"))
+    assert interrupts_of(paused)
+    assert paused.values["user_question"] == (
+        "В один ответ входит не больше 3 наблюдений. Назовите меньше подписей."
+    )
+    assert "четырёх" not in paused.values["user_question"]
+    assert tight.catalog_calls == []
 
 
 @pytest.mark.asyncio
@@ -1269,12 +1497,87 @@ async def test_cover_question_pauses_without_catalog() -> None:
     assert parser.catalog_calls == []
     assert "P&L" in question
     assert "CFS" in question
-    assert "подписей" in question
+    assert "подписи" in question
     assert "CFADS" not in question
     assert "DSCR" not in question
     assert "IRR" not in question
     assert not any(char.isdigit() for char in question)
     assert _seen(model, "plan") == []
+    assert _seen(model, "about") == []
+
+
+@pytest.mark.asyncio
+async def test_ungrounded_overview_publishes_the_book_passport() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.context = _book_document()
+    question = "Расскажи по модели ! дай саммари по ней"
+    model = ScriptedModel()
+    model.push("about", {"about": "book"})
+    model.push("about", {"about": "book"})
+    graph = _graph(parser, model)
+    await _run(graph, question)
+    snap = await graph.aget_state(run_config("thread-1"))
+    draft = snap.values["draft"]
+    assert not interrupts_of(snap)
+    assert snap.values["satisfactory"] is True
+    assert snap.values["gaps"] == []
+    assert snap.values["citations"] == []
+    for piece in (
+        "rvi-project-finance.xlsx",
+        "## Inputs Time Dependent",
+        "- CPI — 2%, млн.",
+        "- Ставка — 7.93%",
+        "- Поток — до 8 168.32, тыс. EUR",
+        "- Срок — 1",
+        "- Доля — с 0 по 3.55, %",
+        "- Годовых — 3.5% p.a.",
+        "- Долг — 60 000, тыс. EUR, Gearing: 0.6",
+        "- Выбор — Live Case: CPI",
+        "- Доходность — IRR: 7.93%",
+        "- Ценность — Target IRR: 11 470.63, тыс. EUR",
+    ):
+        assert piece in draft
+    for piece in (
+        "10219",
+        "Формул",
+        "Предупреждение",
+        "Единица",
+        "Назовите подписи",
+        "secret-concept",
+        "graph.json",
+        "0.5",
+        "0.02",
+        "E-",
+        "Spare",
+        "99",
+        "Checks",
+        "Пустая строка",
+        "с 0 по 0",
+        "с 0%",
+        "99 999",
+        "EUR'000",
+    ):
+        assert piece not in draft
+    about = _seen(model, "about")
+    assert len(about) == 1
+    assert "не открывает одну строку" in about[0]["system"]
+    assert "Расскажи" not in about[0]["system"]
+    assert "саммари" not in about[0]["system"]
+    assert about[0]["user"] == question
+    assert _seen(model, "plan") == []
+    phrase = "Расскажи дай саммари ней"
+    assert [call["q"] for call in parser.catalog_calls].count(phrase) == 1
+    assert parser.observation_calls == []
+    assert parser.context_calls == ["job-1"]
+    await _run(graph, question)
+    again = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(again)
+    assert again.values["satisfactory"] is True
+    assert again.values["gaps"] == []
+    assert again.values["draft"] == draft
+    assert [call["q"] for call in parser.catalog_calls].count(phrase) == 2
+    assert parser.context_calls == ["job-1", "job-1"]
 
 
 @pytest.mark.asyncio

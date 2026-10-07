@@ -173,6 +173,8 @@ class FakeParser:
         self.catalog_calls: list[dict[str, Any]] = []
         self.head_calls: list[str] = []
         self.head_etag: str | None = None
+        self.context: dict[str, Any] | None = None
+        self.context_calls: list[str] = []
         self.error: ParserError | None = None
         self.force_truncated = False
         self.ready_ok = True
@@ -186,6 +188,13 @@ class FakeParser:
     async def get_summary(self, job_id: str) -> tuple[dict[str, Any], str]:
         self._raise()
         return self.summary, self.summary_etag
+
+    async def get_context(self, job_id: str) -> dict[str, Any]:
+        self._raise()
+        self.context_calls.append(job_id)
+        if self.context is None:
+            raise ParserError(404, "not_found")
+        return self.context
 
     async def head_catalog_etag(self, job_id: str) -> str:
         self._raise()
@@ -266,14 +275,15 @@ class ScriptedModel:
         self.seen: list[dict[str, str]] = []
 
     def push(self, role: str, payload: Any) -> ScriptedModel:
-        self.queues[role].append(payload)
+        self.queues.setdefault(role, []).append(payload)
         return self
 
     async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
         self.seen.append({"role": role, "system": system, "user": user})
-        if not self.queues[role]:
+        queue = self.queues.setdefault(role, [])
+        if not queue:
             raise AssertionError(f"no script for {role}")
-        item = self.queues[role].pop(0)
+        item = queue.pop(0)
         if item == "bad":
             raise SchemaError("bad")
         if item == "boom":

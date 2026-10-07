@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Any
+
+from finance_context_agent.text_numbers import display_cached, fold_decimal, scale_display
 
 _MENTION_STOP = frozenset(
     {
@@ -146,13 +149,255 @@ def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
 
 
 def cover_question(summary: dict[str, Any]) -> str:
-    names = [
-        str(sheet)
-        for sheet in (summary.get("sheets") or [])
-        if str(sheet) and not any(char.isdigit() for char in str(sheet))
-    ]
-    lines = ["Какую строку открыть?"]
+    lines: list[str] = []
+    filename = str(summary.get("source_filename") or "").strip()
+    if filename:
+        lines.append(f"Книга {filename}.")
+    lines.append("Какую строку открыть?")
+    names = _sheet_names(summary.get("sheets"))
     if len(names) >= 2:
         lines.append("Листы: " + ", ".join(names) + ".")
-    lines.append("Назовите до четырёх подписей.")
+    formula_count = _positive_count(summary.get("formula_count"))
+    if formula_count is not None:
+        lines.append(f"Формул: {formula_count}.")
+    missing_cache = _positive_count(summary.get("missing_cached_values"))
+    if missing_cache is not None:
+        lines.append(f"Без сохранённого кэша: {missing_cache}.")
+    lines.append("Назовите подписи.")
     return "\n".join(lines)
+
+
+_DATE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+_LIVE = frozenset({"mapped", "abstained"})
+
+
+def book_overview(document: dict[str, Any]) -> str:
+    """Sections and stored figures of the live rows. The document is not kept."""
+    meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+    lines: list[str] = []
+    filename = str(meta.get("source_filename") or "").strip()
+    if filename:
+        lines.append(filename)
+    pending: str | None = None
+    last_heading = ""
+    for block in document.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        for row in block.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            if _is_heading(row):
+                label = _label(row)
+                if label:
+                    pending = label
+                continue
+            rendered = _metric_line(row)
+            if rendered is None:
+                continue
+            if pending and pending != last_heading:
+                lines.append(f"## {pending}")
+                last_heading = pending
+            pending = None
+            lines.append(rendered)
+    return "\n".join(lines)
+
+
+def _sheet_names(sheets: Any) -> list[str]:
+    return [
+        str(sheet)
+        for sheet in (sheets or [])
+        if str(sheet) and not any(char.isdigit() for char in str(sheet))
+    ]
+
+
+def _is_heading(row: dict[str, Any]) -> bool:
+    if row.get("hidden") is True or row.get("disposition") == "excluded":
+        return False
+    return row.get("kind") == "abstract" or row.get("disposition") == "header"
+
+
+def _label(row: dict[str, Any]) -> str:
+    label = str(row.get("label") or "").strip()
+    if not label or label.casefold() == "none":
+        return ""
+    return label
+
+
+def _metric_line(row: dict[str, Any]) -> str | None:
+    if row.get("disposition") not in _LIVE or row.get("hidden") is True:
+        return None
+    if row.get("article_role") == "check":
+        return None
+    label = _label(row)
+    if not label:
+        return None
+    unit = _first_unit(row)
+    percent = _scale_percent(row.get("numeric_summary"), bool(unit and "%" in unit))
+    numbers, endpoints = _summary_text(row.get("numeric_summary"), percent=percent)
+    if unit.casefold() == "date":
+        numbers = ""
+        endpoints = set()
+        unit = ""
+    if percent and unit:
+        rest = unit.replace("%", "").strip()
+        if rest and numbers:
+            numbers = f"{numbers} {rest}"
+        unit = ""
+    elif unit:
+        unit = unit.replace("'000", "").replace("’000", "").strip()
+    dates, notes, loose = _side_notes(row, percent=percent, endpoints=endpoints)
+    if _blank_figure(numbers):
+        numbers = ""
+    if not numbers and loose:
+        numbers = loose[0]
+        notes = loose[1:] + notes
+    scale = ""
+    if numbers or any(char.isdigit() for note in notes for char in note):
+        hints = row.get("hints") if isinstance(row.get("hints"), dict) else {}
+        scale = scale_display(str(hints.get("scale") or ""))
+    measure = " ".join(part for part in (scale, unit) if part)
+    span = _date_span(dates)
+    if numbers:
+        parts = [numbers, measure, span, *notes]
+    else:
+        parts = [*notes, measure, span]
+    if not any(parts):
+        return None
+    body = ", ".join([part for part in parts if part])
+    if not body:
+        return None
+    return f"- {label} — {body}"
+
+
+def _scale_percent(summary: Any, percent: bool) -> bool:
+    """Scale the row only when every stored figure is a fraction."""
+    if not percent:
+        return False
+    if not isinstance(summary, dict):
+        return True
+    for key in ("first", "last", "minimum", "maximum"):
+        folded = fold_decimal(summary.get(key))
+        if folded is None:
+            continue
+        if abs(Decimal(folded)) > 1:
+            return False
+    return True
+
+
+def _zero_end(text: str | None) -> bool:
+    return text in (None, "0", "0%")
+
+
+def _blank_figure(numbers: str) -> bool:
+    head, _, _rest = numbers.partition(" ")
+    return head in ("", "0", "0%")
+
+
+def _summary_text(summary: Any, *, percent: bool) -> tuple[str, set[str]]:
+    if not isinstance(summary, dict):
+        return "", set()
+    shown = {
+        key: display_cached(summary.get(key), percent=percent)
+        for key in ("first", "last", "minimum", "maximum")
+    }
+    ends = {text for text in shown.values() if text}
+    first, last = shown["first"], shown["last"]
+    minimum, maximum = shown["minimum"], shown["maximum"]
+    if summary.get("constant") is True or (ends and len(ends) == 1):
+        return first or last or minimum or maximum or "", ends
+    if (first is not None or last is not None) and _zero_end(first) and _zero_end(last):
+        if _zero_end(minimum) and _zero_end(maximum):
+            return "0", ends
+        if not _zero_end(maximum):
+            text = f"до {maximum}"
+            if not _zero_end(minimum) and minimum != maximum:
+                text += f", минимум {minimum}"
+            return text, ends
+        if not _zero_end(minimum):
+            return f"минимум {minimum}", ends
+        return "0", ends
+    if first and last:
+        text = f"с {first} по {last}"
+    elif first:
+        text = first
+    elif last:
+        text = last
+    else:
+        text = ""
+    extra: list[str] = []
+    if minimum not in (None, first, last):
+        extra.append(f"минимум {minimum}")
+    if maximum not in (None, first, last):
+        extra.append(f"максимум {maximum}")
+    if extra and text:
+        text = f"{text}, " + ", ".join(extra)
+    elif extra:
+        text = ", ".join(extra)
+    return text, ends
+
+
+def _first_unit(row: dict[str, Any]) -> str:
+    for cell in _cells(row):
+        if cell.get("role") != "unit":
+            continue
+        text = str(cell.get("cached_value") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _side_notes(
+    row: dict[str, Any], *, percent: bool, endpoints: set[str]
+) -> tuple[list[str], list[str], list[str]]:
+    dates: list[str] = []
+    notes: list[str] = []
+    loose: list[str] = []
+    for cell in _cells(row):
+        if cell.get("role") == "unit":
+            continue
+        cached = str(cell.get("cached_value") or "").strip()
+        if not cached or cached.casefold() == "none":
+            continue
+        if _DATE.match(cached):
+            dates.append(cached)
+            continue
+        plain = display_cached(cached, percent=False)
+        as_series = display_cached(cached, percent=percent)
+        if plain in ("0", "1") or as_series in ("0", "1", "0%", "100%"):
+            continue
+        if (as_series is not None and as_series in endpoints) or (
+            plain is not None and plain in endpoints
+        ):
+            continue
+        header = str(cell.get("header") or "").strip()
+        text = as_series if percent and as_series is not None else plain
+        if text is None:
+            text = cached
+        if plain is not None and not header:
+            if endpoints:
+                continue
+            loose.append(text)
+            continue
+        notes.append(f"{header}: {text}" if header else text)
+    return dates, notes, loose
+
+
+def _date_span(dates: list[str]) -> str:
+    if len(dates) >= 2:
+        return f"{dates[0]}–{dates[1]}"
+    if dates:
+        return dates[0]
+    return ""
+
+
+def _cells(row: dict[str, Any]) -> list[dict[str, Any]]:
+    cells = row.get("cells")
+    if not isinstance(cells, list):
+        return []
+    return [cell for cell in cells if isinstance(cell, dict)]
+
+
+def _positive_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
