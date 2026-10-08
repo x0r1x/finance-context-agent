@@ -1,6 +1,6 @@
 """The closed set a choice is built from. No graph and no network."""
 
-from finance_context_agent.questions import choice_rows, ranker_state
+from finance_context_agent.questions import choice_rows, inventory_rows, ranker_state
 from tests.fakes import catalog_row
 
 _FILE = "packt-project-finance.xlsx"
@@ -83,6 +83,64 @@ def test_ebitda_question_keeps_both_rows() -> None:
     labels = [row["label"] for row in choice_rows("Какой EBITDA?", rows)]
     assert labels == [short, long]
     assert [row["label"] for row in choice_rows("Какой EBITDA в 2030?", rows)] == labels
+
+
+def test_capex_inventory_lists_every_sheet() -> None:
+    question = "какие еще есть CAPEX в книге и на каких листах?"
+    rows = [
+        catalog_row("exact", "CAPEX (including SPV costs)", sheet="Input Assumptions"),
+        catalog_row("bare", "CAPEX", sheet="Construction"),
+        catalog_row("bare-again", "CAPEX", sheet="Construction"),
+        catalog_row("short", "CAPEX (incl. SPV costs)", sheet="Ratios"),
+        catalog_row("other", "EBITDA", sheet="P&L"),
+    ]
+    shown, total = inventory_rows(question, rows)
+    assert [(row["label"], row["sheet"]) for row in shown] == [
+        ("CAPEX (including SPV costs)", "Input Assumptions"),
+        ("CAPEX", "Construction"),
+        ("CAPEX (incl. SPV costs)", "Ratios"),
+    ]
+    assert total == 3
+    assert shown[1]["row_key"] == "bare"
+
+
+def test_debt_inventory_is_wider_than_the_choice_pool() -> None:
+    question = "перечисли строки про Debt"
+    labels = (
+        ("tba", "DEBT TIMELINE", "TBA"),
+        ("amount", "Total Debt Amount (k£)", "Construction"),
+        ("src", "Debt (k£)", "Construction"),
+        ("sched", "Debt Drawdown Schedule", "Construction"),
+        ("bop", "Debt Outstanding BoP (k£)", "Construction"),
+        ("draw", "Debt Drawdown (k£)", "Construction"),
+        ("eop", "Debt Outstanding EoP (k£)", "Construction"),
+        ("repay", "Debt Repayment Schedule", "Debt"),
+        ("service", "Debt service", "Debt"),
+        ("cfads", "Cash Flow Available for Debt Service (CFADS)", "CFS"),
+        ("bs", "Debt", "Balance Sheet"),
+    )
+    rows = [catalog_row(key, label, sheet=sheet) for key, label, sheet in labels]
+    shown, total = inventory_rows(question, rows)
+    assert total == 11
+    assert [row["row_key"] for row in shown] == [key for key, _label, _sheet in labels]
+    assert len(choice_rows(question, rows)) == 8
+
+
+def test_inventory_stops_at_twenty_four() -> None:
+    rows = [catalog_row(f"c{index}", f"CAPEX {index}") for index in range(25)]
+    shown, total = inventory_rows("какие есть CAPEX", rows)
+    assert total == 25
+    assert len(shown) == 24
+    assert shown[0]["row_key"] == "c0"
+    assert shown[-1]["row_key"] == "c23"
+
+
+def test_inventory_ignores_the_filename_and_unrelated_labels() -> None:
+    rows = [
+        catalog_row("cover", "PROJECT FINANCING", sheet="Input Assumptions"),
+        catalog_row("other", "EBITDA", sheet="P&L"),
+    ]
+    assert inventory_rows(f"сделай саммари {_FILE}", rows, [_FILE]) == ([], 0)
 
 
 def test_ranker_state_names_the_book_only_when_no_row_is_offered() -> None:

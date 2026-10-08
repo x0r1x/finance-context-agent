@@ -10,6 +10,7 @@ from langgraph.types import interrupt
 
 from finance_context_agent.catalog import (
     MENU_INSTRUCTION,
+    _heading,
     compact_row,
     matching_rows,
     narrow_page,
@@ -27,6 +28,7 @@ from finance_context_agent.prompts import (
     without_account_code,
 )
 from finance_context_agent.questions import (
+    LIST_FLOOR,
     asks_how,
     book_overview,
     books_reply,
@@ -34,6 +36,7 @@ from finance_context_agent.questions import (
     choice_rows,
     decide_margin,
     file_segments,
+    inventory_rows,
     name_tokens,
     ranker_state,
 )
@@ -156,7 +159,9 @@ def build_graph(
         filename = str((state.get("summary") or {}).get("source_filename") or "").strip()
         filenames = [filename] if filename else []
         pool = choice_rows(text, found, filenames)
-        return await _rank_labels(state, text, pool, ranker, parser, settings)
+        return await _rank_labels(
+            state, text, pool, found, filenames, ranker, parser, settings
+        )
 
     async def search(state: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
@@ -1131,10 +1136,65 @@ def _named_periods(state: dict[str, Any], text: str) -> list[dict[str, str]]:
     return named
 
 
+def _sheet_list(
+    state: dict[str, Any],
+    text: str,
+    catalog_rows: list[dict[str, Any]],
+    filenames: list[str],
+    settings: Settings,
+) -> dict[str, Any]:
+    """The matching labels and their sheets. The turn ends without a number."""
+    shown, total = inventory_rows(text, catalog_rows, filenames)
+    if not shown:
+        return _ask(state, _MISSING_ROW, settings=settings) | {
+            "label_reply": True,
+            "draft_from_cache": False,
+            "cache_missing": False,
+        }
+    lines: list[str] = []
+    for row in shown:
+        label = str(row.get("label") or "").strip()
+        lines.append(label)
+        sheet = str(row.get("sheet") or "").strip()
+        heading = _heading(row.get("label_path"), label)
+        detail: list[str] = []
+        if sheet:
+            detail.append(f"Лист {sheet}.")
+        if heading:
+            detail.append(f"Раздел {heading}.")
+        if detail:
+            lines.append(" ".join(detail))
+    if total > len(shown):
+        lines.append(f"Показаны первые {len(shown)} из {total}.")
+    return {
+        "draft": "\n".join(lines),
+        "gaps": [],
+        "satisfactory": True,
+        "citations": [],
+        "terminal": "done",
+        "awaiting": "",
+        "offers": [],
+        "pending": "",
+        "user_question": "",
+        "menu_question": "",
+        "selected": [],
+        "period_ids": [],
+        "human_reply": "",
+        "label_reply": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "search_again": False,
+        "just_bound_row": False,
+        "just_bound_job": False,
+    }
+
+
 async def _rank_labels(
     state: dict[str, Any],
     text: str,
     pool: list[dict[str, Any]],
+    catalog_rows: list[dict[str, Any]],
+    filenames: list[str],
     ranker: Any,
     parser: ParserClient,
     settings: Settings,
@@ -1144,7 +1204,11 @@ async def _rank_labels(
         raise ModelError("ranker")
     criteria, by_key = _choice_criteria(pool, state)
     filename = str((state.get("summary") or {}).get("source_filename") or "")
-    choice = await ranker.choose(ranker_state(filename, text, bool(pool)), criteria)
+    choice = await ranker.choose(
+        ranker_state(filename, text, bool(pool)), criteria, ask_act=bool(pool)
+    )
+    if pool and choice.sheets is not None and choice.sheets >= LIST_FLOOR:
+        return _sheet_list(state, text, catalog_rows, filenames, settings)
     decision = decide_margin(choice.probabilities, set(by_key), menu_open=False)
     if decision.get("act") == "take":
         key = str(decision.get("key") or "")

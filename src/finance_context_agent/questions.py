@@ -95,6 +95,9 @@ PICK_GAP = 0.15
 MENU_FLOOR = 0.25
 SHORTLIST_CAP = 24
 MENU_CAP = 8
+# Measured 2026-10-08: a bare label scores sheets 0.709, "есть ли еще CAPEX" scores 0.771.
+LIST_FLOOR = 0.75
+INVENTORY_CAP = 24
 
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 
@@ -337,6 +340,38 @@ def choice_rows(
                 taken.add(key)
             chosen.append(row)
     return chosen
+
+
+def inventory_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """Every label that shares a reply word. One row per label and sheet.
+
+    The choice pool still drops a neighbor band and stops at MENU_CAP. This
+    list is the wider set printed when the reply asks where the rows sit.
+    """
+    words = _choice_words(text, list(filenames or []))
+    if not words:
+        return [], 0
+    pairs: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    for row in rows:
+        key = str(row.get("row_key") or "")
+        label = str(row.get("label") or "").strip()
+        if not label or (key and key in seen_keys):
+            continue
+        score = sum(1 for word in words if _bounded(label.casefold(), word))
+        if score <= 0:
+            continue
+        if key:
+            seen_keys.add(key)
+        pair = (label.casefold(), str(row.get("sheet") or "").strip().casefold())
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        pairs.append(row)
+    return pairs[:INVENTORY_CAP], len(pairs)
 
 
 def ranker_state(filename: str, text: str, has_rows: bool) -> str:

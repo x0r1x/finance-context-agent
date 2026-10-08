@@ -260,8 +260,10 @@ class GateRanker:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def choose(self, state: str, criteria: dict[str, str]) -> Choice:
-        del state, criteria
+    async def choose(
+        self, state: str, criteria: dict[str, str], *, ask_act: bool = False
+    ) -> Choice:
+        del state, criteria, ask_act
         self.entered.set()
         await self.release.wait()
         return Choice("intro", {"intro": 0.9, "books": 0.02, "book": 0.02})

@@ -2341,6 +2341,9 @@ async def test_summary_of_the_open_book_is_the_overview() -> None:
     assert "PROJECT FINANCING" not in blob
     assert "Project IRR" not in blob
     assert ranker.calls[0]["state"].startswith(f"Книга {_PACKT}.")
+    assert ranker.calls[0]["ask_act"] is False
+    assert "values" not in heard
+    assert "sheets" not in heard
     assert snap.values["draft"] == book_overview(parser.context)
     assert "Какую строку взять?" not in snap.values["draft"]
     assert snap.values["selected"] == []
@@ -2454,3 +2457,90 @@ async def test_unbound_greeting_asks_which_book() -> None:
     assert "Какую книгу открыть?" in snap.values["user_question"]
     assert "finance-context-agent" not in snap.values["user_question"]
     assert parser.context_calls == []
+
+
+def _capex_catalog() -> list[dict]:
+    return [
+        catalog_row("exact", "CAPEX (including SPV costs)", sheet="Input Assumptions"),
+        catalog_row("bare", "CAPEX", sheet="Construction"),
+        catalog_row("short", "CAPEX (incl. SPV costs)", sheet="Ratios"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sheet_question_lists_every_capex() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = _capex_catalog()
+    parser.observations[("job-1", "short")] = [
+        observation("short", "Y1", "-75000", "C1", label="CAPEX (incl. SPV costs)"),
+        observation("short", "Y5", "0", "C5", label="CAPEX (incl. SPV costs)"),
+    ]
+    ranker = FakeRanker()
+    ranker.push("r2", {"r2": 0.71, "r0": 0.19, "r1": 0.10}, sheets=0.90)
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "какие еще есть CAPEX в книге и на каких листах?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(snap)
+    assert snap.values["satisfactory"] is True
+    assert snap.values["citations"] == []
+    assert snap.values["selected"] == []
+    assert parser.observation_calls == []
+    assert snap.values["draft"] == (
+        "CAPEX (including SPV costs)\n"
+        "Лист Input Assumptions.\n"
+        "CAPEX\n"
+        "Лист Construction.\n"
+        "CAPEX (incl. SPV costs)\n"
+        "Лист Ratios."
+    )
+    assert "-75000" not in snap.values["draft"]
+    assert "Какую строку взять?" not in snap.values["draft"]
+    assert "№1" not in snap.values["draft"]
+    assert len(ranker.calls) == 1
+    assert ranker.calls[0]["ask_act"] is True
+    assert "sheets" not in ranker.calls[0]["criteria"]
+    assert set(ranker.calls[0]["criteria"].values()) == {
+        "CAPEX (including SPV costs)",
+        "CAPEX",
+        "CAPEX (incl. SPV costs)",
+    }
+
+
+@pytest.mark.asyncio
+async def test_low_sheets_score_still_prints_the_row() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = _capex_catalog()
+    parser.observations[("job-1", "short")] = [
+        observation("short", "Y1", "-75000", "C1", label="CAPEX (incl. SPV costs)")
+    ]
+    ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.8, "r1": 0.1}, sheets=0.10)
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "CAPEX (incl. SPV costs)")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert "-75000" in snap.values["draft"]
+    assert parser.observation_calls
+    assert "Input Assumptions" not in snap.values["draft"]
+    assert "Construction" not in snap.values["draft"]
+    assert snap.values["citations"]
+
+
+@pytest.mark.asyncio
+async def test_ebitda_value_is_not_a_sheet_list() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = [catalog_row("ebitda", "EBITDA", sheet="P&L")]
+    parser.observations[("job-1", "ebitda")] = [
+        observation("ebitda", "Y1", "88", "C1", label="EBITDA")
+    ]
+    ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.9}, sheets=0.61)
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "Какой EBITDA в Y1?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert parser.observation_calls
+    assert snap.values["citations"]
+    assert snap.values["citations"][0]["value"] == "88"
+    assert snap.values["citations"][0]["period_id"] == "Y1"
