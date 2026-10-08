@@ -91,7 +91,13 @@ async def _run(
     completion: dict[str, Any] | None = None
     try:
         snapshot = await graph.aget_state(config)
-        repeat_pause = derived and not follow_up and bool(interrupts_of(snapshot))
+        stored_question = str((getattr(snapshot, "values", None) or {}).get("question") or "")
+        repeat_pause = (
+            derived
+            and not follow_up
+            and bool(interrupts_of(snapshot))
+            and text.strip() == stored_question.strip()
+        )
         try:
             if repeat_pause:
                 ensure_same_job(snapshot, job_id)

@@ -162,6 +162,7 @@ def two_first_years() -> list[dict[str, Any]]:
 class FakeParser:
     def __init__(self) -> None:
         self.jobs: list[dict[str, Any]] = []
+        self.list_calls: list[dict[str, Any]] = []
         self.summary: dict[str, Any] = {"marker": "passport", "coverage": {"mapped": 1}}
         self.axes: list[dict[str, Any]] = []
         self.book_etag = "etag-1"
@@ -183,6 +184,7 @@ class FakeParser:
         self, *, status: str | None = None, q: str | None = None
     ) -> list[dict[str, Any]]:
         self._raise()
+        self.list_calls.append({"status": status, "q": q})
         return list(self.jobs)
 
     async def get_summary(self, job_id: str) -> tuple[dict[str, Any], str]:
@@ -278,7 +280,14 @@ class ScriptedModel:
         self.queues.setdefault(role, []).append(payload)
         return self
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]:
         self.seen.append({"role": role, "system": system, "user": user})
         queue = self.queues.setdefault(role, [])
         if not queue:
@@ -299,7 +308,14 @@ class ByQuestion:
     def __init__(self) -> None:
         self.seen: list[dict[str, str]] = []
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]:
         self.seen.append({"role": role, "system": system, "user": user})
         data = json.loads(user)
         question = str(data.get("question") or "")

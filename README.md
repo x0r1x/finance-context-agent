@@ -113,7 +113,7 @@ curl -sS http://127.0.0.1:8090/v1/chat/completions \
   }'
 ```
 
-`job_id` matches `^[A-Za-z0-9._-]{1,128}$`. `thread_id` matches `^[A-Za-z0-9_-]{1,255}$`. Omit `thread_id` and the agent derives a stable id from the first user message and the optional `user` field: `c` plus 32 hex characters of SHA-256. The same opening returns the same id. A later request that includes the assistant reply continues that dialog. The same first message with no assistant reply repeats an open pause and does not answer it. Two chats that open with the same text share one dialog unless they send `thread_id` or a different `user`. Omit `job_id` on a new dialog and the agent lists succeeded books by file name and waits:
+`job_id` matches `^[A-Za-z0-9._-]{1,128}$`. `thread_id` matches `^[A-Za-z0-9_-]{1,255}$`. Omit `thread_id` and the agent derives a stable id from the first user message and the optional `user` field: `c` plus 32 hex characters of SHA-256. The same opening returns the same id. A later request that includes the assistant reply continues that dialog. Open WebUI sends its chat id in `X-Thread-Id`, so a new chat does not share that dialog. A derived id repeats an open pause only when the same question arrives again with no assistant reply. Omit `job_id` and a question that needs a book lists succeeded books by file name and waits:
 
 ```text
 Какую книгу открыть?
@@ -154,16 +154,20 @@ A finished completion looks like this. `id` and `created` vary.
 }
 ```
 
-`finish_reason` is always `stop`. A pause is `awaiting_user: true`, and `content` is the question. While that flag is true, the next user message on the same `thread_id` resumes the pause. After the graph has finished, the next message is a new question on the same dialog: the chosen book stays, and a follow-up such as `А почему?` uses the citations already stored. A different `job_id` on a thread that already has a book is 409 `job_mismatch`.
+`finish_reason` is always `stop`. A pause is `awaiting_user: true`, and `content` is the question. While that flag is true, the next user message on the same `thread_id` resumes the pause. After the graph has finished, the next message is a new question on the same dialog: the chosen book stays, and a follow-up with no new label, such as `А почему?`, keeps the chosen rows and reads their cache again. A different `job_id` on a thread that already has a book is 409 `job_mismatch`.
 
 Several catalog rows, or a period that maps to more than one axis key, produce a question and no cell values. The row question lists labels and `total`:
 
 ```text
-Какую строку взять?
-«DSCR»: 2. DSCR observed [Debt, dscr]; DSCR covenant [Debt, dscr_covenant]
+Какую строку взять? Напишите номер.
+«DSCR»: 2.
+№1 DSCR observed
+Лист Debt. Раздел dscr.
+№2 DSCR covenant
+Лист Debt. Раздел dscr_covenant.
 ```
 
-Reply with the label you want, on the same `thread_id`. Two replies is the cap (`CLARIFY_BUDGET`). The same question asked again closes the turn with `satisfactory: false`.
+Reply with the number or the label, on the same `thread_id`. The sheet is written in words and is not copied into the reply. An exact reply is the number, the label, or the printed choice line; the catalog is not searched again and the model is not called for that reply. The number is written with `№`; a phrase that is not equal to an item is mapped by the model over the closed set `none` and the numbers, and a recognized item answers from the cache. When no period was named, every cached period that fits the cap is printed. A later reply that only names a period narrows those same rows and does not open the menu. A catalog miss that does not ask for the book does not open the overview. An empty catalog that asks which books exist lists the finished files and does not open the overview. That reply, including a question about the agent itself, names the agent and what it can do, and does not open or name a book. Repeating the same question while the menu is open shows that menu again and does not close the turn. Showing the menu starts the two replies over (`CLARIFY_BUDGET`).
 
 Other pauses, in the words the agent sends:
 

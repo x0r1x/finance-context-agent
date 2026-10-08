@@ -1,9 +1,11 @@
-"""Prompts for the planner, the book-or-row check, and the answer."""
+"""Prompts for the planner, the book-or-row check, the menu choice, and the answer."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
+
+from finance_context_agent.catalog import menu_choices
 
 
 def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
@@ -44,14 +46,33 @@ def plan_messages(state: dict[str, Any]) -> tuple[str, str]:
     return system, user
 
 
-def about_messages(question: str) -> tuple[str, str]:
-    """The catalog grounded nothing. book is the whole workbook; row is a missing label."""
+def choose_messages(rows: list[dict[str, Any]], reply: str) -> tuple[str, str]:
+    """One closed choice. none when no item, or more than one item, fits the reply."""
     system = (
-        "Каталог не содержит подписи из вопроса. "
-        "book — вопрос не открывает одну строку и говорит о книге целиком. "
-        "row — вопрос требует открыть одну строку, а её подписи в каталоге нет."
+        "Ищи в реплике номер, подпись или лист ровно одного пункта. "
+        "Нашёл один — верни его номер. Не нашёл или нашёл несколько — верни none. "
+        "Финансовый вопрос не отвечай."
     )
-    return system, question
+    user = json.dumps(
+        {"items": menu_choices(rows), "reply": reply},
+        ensure_ascii=False,
+    )
+    return system, user
+
+
+def about_messages(question: str, filenames: list[str]) -> tuple[str, str]:
+    """Acts only. The file list is data. Code runs the inventory, the overview, or the row."""
+    system = (
+        "Верни все подходящие акты. Список файлов лежит в данных. "
+        "chitchat — реплика про агента или короткая вежливость, "
+        "не про перечень книг и не про показатель. "
+        "books — реплика спрашивает, какие книги или файлы есть или что загружено. "
+        "book — реплика просит обзор одной книги или модели целиком. "
+        "row — реплика просит конкретный показатель. "
+        "Если подходят несколько, верни каждый. Числа не пиши."
+    )
+    user = json.dumps({"files": filenames, "reply": question}, ensure_ascii=False)
+    return system, user
 
 
 def without_account_code(value: Any) -> Any:

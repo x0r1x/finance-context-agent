@@ -35,7 +35,9 @@ class GateModel:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict:
+    async def complete_json(
+        self, *, role: str, system: str, user: str, options: list[str] | None = None
+    ) -> dict:
         self.entered.set()
         await self.release.wait()
         if role == "plan":
@@ -86,7 +88,9 @@ async def test_healthz_ignores_the_parser_and_readyz_checks_both() -> None:
 async def test_stream_and_non_user_message_are_rejected() -> None:
     parser = FakeParser()
     parser.jobs = [{"job_id": JOB, "source_filename": "model.xlsx"}]
-    app, _graph = _app(parser, ScriptedModel())
+    model = ScriptedModel()
+    model.push("about", {"acts": ["row"]})
+    app, _graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         models = await client.get("/v1/models")
         streamed = await client.post(
@@ -157,6 +161,30 @@ async def test_missing_thread_id_is_minted() -> None:
                 "user": "alice",
             },
         )
+        model.push("about", {"acts": ["chitchat"]})
+        model.push("about", {"acts": ["row"]})
+        model.push("about", {"acts": ["chitchat"]})
+        hello = "привет"
+        opened_hello = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": hello}]},
+        )
+        hello_text = opened_hello.json()["choices"][0]["message"]["content"]
+        paused_hello = await client.post(
+            "/v1/chat/completions",
+            json={
+                "job_id": JOB,
+                "messages": [
+                    {"role": "user", "content": hello},
+                    {"role": "assistant", "content": hello_text},
+                    {"role": "user", "content": "Какой ZZZ?"},
+                ],
+            },
+        )
+        fresh_hello = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": hello}]},
+        )
     body = response.json()
     assert response.status_code == 200
     assert _DERIVED.fullmatch(body["thread_id"])
@@ -169,6 +197,19 @@ async def test_missing_thread_id_is_minted() -> None:
     assert body["satisfactory"] is True
     assert body["awaiting_user"] is False
     assert body["citations"][0]["cell"] == "C10"
+    assert opened_hello.status_code == 200
+    assert opened_hello.json()["thread_id"] == derived_thread_id(hello)
+    assert opened_hello.json()["awaiting_user"] is False
+    assert "finance-context-agent" in hello_text
+    assert paused_hello.json()["thread_id"] == derived_thread_id(hello)
+    assert paused_hello.json()["awaiting_user"] is True
+    assert "Такой строки нет" in paused_hello.json()["choices"][0]["message"]["content"]
+    fresh_body = fresh_hello.json()
+    assert fresh_hello.status_code == 200
+    assert fresh_body["thread_id"] == derived_thread_id(hello)
+    assert fresh_body["awaiting_user"] is False
+    assert "Такой строки нет" not in fresh_body["choices"][0]["message"]["content"]
+    assert "finance-context-agent" in fresh_body["choices"][0]["message"]["content"]
 
 
 @pytest.mark.asyncio
@@ -177,6 +218,8 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
     parser.jobs = [{"job_id": JOB, "source_filename": "model.xlsx"}]
     _ready(parser)
     model = ScriptedModel()
+    model.push("about", {"acts": ["row"]})
+    model.push("about", {"acts": ["row"]})
     app, graph = _app(parser, model)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         asked = await client.post(

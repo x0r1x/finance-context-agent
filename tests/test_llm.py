@@ -93,6 +93,10 @@ async def test_chat_completions_body_uses_json_schema() -> None:
             )
         elif role == "answer":
             content = '{"text":"0","citations":[]}'
+        elif role == "choose":
+            content = '{"option":"1"}'
+        elif role == "about":
+            content = '{"acts":["chitchat"]}'
         else:
             content = '{"gaps":[]}'
         body = {"choices": [{"message": {"role": "assistant", "content": content}}]}
@@ -101,11 +105,15 @@ async def test_chat_completions_body_uses_json_schema() -> None:
     chat = _chat(handler)
     await chat.complete_json(role="plan", system="s", user="u")
     await chat.complete_json(role="answer", system="s", user="u")
+    await chat.complete_json(role="choose", system="s", user="u", options=["1", "2"])
+    await chat.complete_json(role="about", system="s", user="u")
     await chat.aclose()
 
     assert [item["response_format"]["json_schema"]["name"] for item in seen] == [
         "plan",
         "answer",
+        "choose",
+        "about",
     ]
     for payload in seen:
         assert list(payload) == ["model", "temperature", "messages", "response_format"]
@@ -136,6 +144,25 @@ async def test_chat_completions_body_uses_json_schema() -> None:
         "text",
         "citations",
     }
+    choose = seen[2]["response_format"]["json_schema"]["schema"]
+    assert choose["properties"]["option"]["enum"] == ["none", "1", "2"]
+    about = seen[3]["response_format"]["json_schema"]["schema"]
+    assert set(about["properties"]) == {"acts"}
+    assert about["properties"]["acts"]["items"]["enum"] == ["chitchat", "books", "book", "row"]
+    assert about["additionalProperties"] is False
+    assert about["required"] == ["acts"]
+    refused = {"n": 0}
+
+    def reject(request: httpx.Request) -> httpx.Response:
+        refused["n"] += 1
+        body = {"choices": [{"message": {"content": '{"option":"9"}'}}]}
+        return httpx.Response(200, json=body)
+
+    closed = _chat(reject)
+    with pytest.raises(SchemaError):
+        await closed.complete_json(role="choose", system="s", user="u", options=["1", "2"])
+    assert refused["n"] == 2
+    await closed.aclose()
 
 
 def _assert_strict_schema(node: object) -> None:

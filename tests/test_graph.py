@@ -6,10 +6,15 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from finance_context_agent.catalog import choice_question, narrow_page
-from finance_context_agent.graph import build_graph
+from finance_context_agent.graph import _offers_from_pause, build_graph
 from finance_context_agent.llm import ModelError
 from finance_context_agent.parser import ParserError
-from finance_context_agent.questions import question_needles
+from finance_context_agent.questions import (
+    book_overview,
+    books_reply,
+    chitchat_reply,
+    question_needles,
+)
 from finance_context_agent.session import interrupts_of
 from finance_context_agent.settings import Settings
 from finance_context_agent.turn import new_turn_input, run_config
@@ -94,8 +99,8 @@ def _menu_text(needle, rows, total, *, narrow: bool):
             None,
             True,
             ["short", "empty"],
-            ["EBITDA [Model]", "Operating Income or Loss (EBITDA)"],
-            ["Reported EBITDA"],
+            ["№1 EBITDA", "Operating Income or Loss (EBITDA)", "Лист Model"],
+            ["Reported EBITDA", "["],
             id="exact-ebitda-keeps-acronym",
         ),
         pytest.param(
@@ -107,7 +112,7 @@ def _menu_text(needle, rows, total, *, narrow: bool):
             None,
             True,
             ["exact", "during"],
-            ["CFADS [Model]", "CFADS during debt term"],
+            ["№1 CFADS", "CFADS during debt term", "Лист Model"],
             [],
             id="cfads-prefix-keeps-debt-term",
         ),
@@ -167,8 +172,8 @@ def _menu_text(needle, rows, total, *, narrow: bool):
             None,
             True,
             ["project", "equity"],
-            ["Project IRR", "Equity IRR", "Model, Equity"],
-            ["CAPEX", "WACC"],
+            ["Project IRR", "Equity IRR", "Раздел Equity"],
+            ["CAPEX", "WACC", "["],
             id="path-or-concept-only-stays-out",
         ),
         pytest.param(
@@ -187,8 +192,8 @@ def _menu_text(needle, rows, total, *, narrow: bool):
             None,
             True,
             ["heading", "value", "other"],
-            ["Returns", "значение", "заголовок"],
-            [],
+            ["Returns", "значение", "заголовок", "Лист Ratios"],
+            ["["],
             id="same-label-uses-section-heading",
         ),
         pytest.param(
@@ -433,6 +438,7 @@ async def test_russian_debt_word_is_not_rewritten_to_debt() -> None:
     rows = [catalog_row(f"row-{index}", f"Debt {index}") for index in range(8)]
     parser.pages[("job-1", "debt")] = page(rows, total=26)
     model = ScriptedModel()
+    model.push("about", {"acts": ["row"]})
     graph = _graph(parser, model)
     await _run(graph, "Какой долг?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -443,7 +449,7 @@ async def test_russian_debt_word_is_not_rewritten_to_debt() -> None:
     assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
     assert parser.context_calls == []
-    assert _seen(model, "about") == []
+    assert len(_seen(model, "about")) == 1
     assert _seen(model, "plan") == []
 
 
@@ -648,8 +654,11 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
             catalog_row("row-lim", "DSCR лимит", concept="dscr.limit", sheet="Limits"),
         ],
     )
+    parser.observations[("job-1", "row-lim")] = [
+        observation("row-lim", "2029", "1.10", "C9", label="DSCR лимит"),
+        observation("row-lim", "2030", "1.25", "C10", label="DSCR лимит"),
+    ]
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -660,6 +669,211 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     assert "999" not in question
     assert "1.25" not in question
     _slim(snap.values)
+    rebuilt = await _offers_from_pause({**snap.values, "offers": []}, parser, Settings())
+    assert {row["row_key"] for row in rebuilt} == {"row-obs", "row-lim"}
+    assert "concept_id" not in rebuilt[0]
+    searched = len(parser.catalog_calls)
+    menu = snap.values["user_question"]
+    assert "Напишите номер" in menu
+    assert "№1" in menu
+    assert "№2" in menu
+    assert "Лист" in menu
+    assert "[" not in menu
+    model.push("choose", {"option": "none"})
+    await graph.ainvoke(
+        Command(resume="CAPEX [Construction];"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    copied = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(copied)
+    copied_text = copied.values["user_question"]
+    assert "Не нашёл такую строку" in copied_text
+    assert "Не смог выбрать строку" not in copied_text
+    assert parser.observation_calls == []
+    assert len(parser.catalog_calls) == searched
+    assert _seen(model, "plan") == []
+    assert len(_seen(model, "choose")) == 1
+    assert "concept_id" not in _seen(model, "choose")[0]["user"]
+    repeats = len(_seen(model, "choose"))
+    for _ in range(3):
+        await graph.ainvoke(
+            Command(resume="Какой DSCR в 2030?"),
+            run_config("thread-1"),
+            durability="sync",
+        )
+        again = await graph.aget_state(run_config("thread-1"))
+        assert interrupts_of(again)
+        assert again.values["user_question"] == menu
+        assert "DSCR лимит" in again.values["user_question"]
+        assert "DSCR наблюдённый" in again.values["user_question"]
+        assert "Не нашёл такую строку" not in again.values["user_question"]
+        assert "Не смог выбрать строку" not in again.values["user_question"]
+        assert again.values["clarify_rounds"] == 0
+        assert parser.observation_calls == []
+        assert len(parser.catalog_calls) == searched
+        assert _seen(model, "plan") == []
+        assert len(_seen(model, "choose")) == repeats
+    model.push("choose", {"option": "none"})
+    await graph.ainvoke(
+        Command(resume="нет такой подписи"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    missed = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(missed)
+    missed_text = missed.values["user_question"]
+    assert "Не нашёл такую строку" in missed_text
+    assert "Не смог выбрать строку" not in missed_text
+    assert "DSCR лимит" in missed_text
+    assert parser.observation_calls == []
+    assert len(parser.catalog_calls) == searched
+    assert _seen(model, "plan") == []
+    await graph.ainvoke(
+        Command(resume="Какой DSCR в 2030?"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    restored = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(restored)
+    assert restored.values["user_question"] == menu
+    assert restored.values["clarify_rounds"] == 0
+    assert "Не нашёл такую строку" not in restored.values["user_question"]
+    assert parser.observation_calls == []
+    assert len(parser.catalog_calls) == searched
+    model.push("choose", {"option": "9"})
+    await graph.ainvoke(
+        Command(resume="нет такой подписи"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    missed_again = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(missed_again)
+    assert "Не нашёл такую строку" in missed_again.values["user_question"]
+    assert "Не смог выбрать строку" not in missed_again.values["user_question"]
+    assert parser.observation_calls == []
+    before_number = len(_seen(model, "choose"))
+    await graph.ainvoke(
+        Command(resume="2"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    chosen = await graph.aget_state(run_config("thread-1"))
+    assert not interrupts_of(chosen)
+    assert chosen.values["satisfactory"] is True
+    assert "clarify" not in chosen.values["gaps"]
+    assert "Не смог выбрать строку" not in chosen.values["draft"]
+    assert chosen.values["citations"][0]["row_key"] == "row-lim"
+    assert parser.observation_calls[0]["row_key"] == "row-lim"
+    assert parser.observation_calls[0]["period_ids"] == ["2030"]
+    assert len(parser.catalog_calls) == searched
+    assert _seen(model, "plan") == []
+    assert len(_seen(model, "choose")) == before_number
+    await _run(graph, "Какой DSCR в 2030?", thread="thread-2")
+    model.push("choose", {"option": "none"})
+    await graph.ainvoke(
+        Command(resume="нет такой подписи"),
+        run_config("thread-2"),
+        durability="sync",
+    )
+    first_miss = await graph.aget_state(run_config("thread-2"))
+    assert interrupts_of(first_miss)
+    assert "Не нашёл такую строку" in first_miss.values["user_question"]
+    model.push("choose", "bad")
+    await graph.ainvoke(
+        Command(resume="нет такой подписи"),
+        run_config("thread-2"),
+        durability="sync",
+    )
+    closed = await graph.aget_state(run_config("thread-2"))
+    assert not interrupts_of(closed)
+    assert "Не смог выбрать строку" in closed.values["draft"]
+    assert "clarify" in closed.values["gaps"]
+    await _run(graph, "Какой DSCR в 2030?", thread="thread-phrase")
+    model.push("choose", {"option": "2"})
+    await graph.ainvoke(
+        Command(resume="DSCR лимит на листе Limits"),
+        run_config("thread-phrase"),
+        durability="sync",
+    )
+    phrased = await graph.aget_state(run_config("thread-phrase"))
+    assert not interrupts_of(phrased)
+    assert phrased.values["citations"][0]["row_key"] == "row-lim"
+    assert "clarify" not in phrased.values["gaps"]
+    assert _seen(model, "plan") == []
+    choose_calls = _seen(model, "choose")
+    assert choose_calls[-1]["role"] == "choose"
+    assert "concept_id" not in choose_calls[-1]["user"]
+    assert "row_key" not in choose_calls[-1]["user"]
+    assert "999" not in choose_calls[-1]["user"]
+    assert "CAPEX" not in choose_calls[-1]["system"]
+    assert "none" in choose_calls[-1]["system"]
+    await _run(graph, "Какой DSCR в 2030?", thread="thread-label")
+    labeled = len(_seen(model, "choose"))
+    await graph.ainvoke(
+        Command(resume="DSCR лимит"),
+        run_config("thread-label"),
+        durability="sync",
+    )
+    exact = await graph.aget_state(run_config("thread-label"))
+    assert not interrupts_of(exact)
+    assert exact.values["citations"][0]["row_key"] == "row-lim"
+    assert len(_seen(model, "choose")) == labeled
+    await _run(graph, "Какой DSCR в 2030?", thread="thread-mark")
+    marked = len(_seen(model, "choose"))
+    await graph.ainvoke(
+        Command(resume="№2"),
+        run_config("thread-mark"),
+        durability="sync",
+    )
+    mark = await graph.aget_state(run_config("thread-mark"))
+    assert not interrupts_of(mark)
+    assert mark.values["citations"][0]["row_key"] == "row-lim"
+    assert len(_seen(model, "choose")) == marked
+    await _run(graph, "Какой DSCR?", thread="thread-period")
+    model.push("choose", {"option": "none"})
+    await graph.ainvoke(
+        Command(resume="нет такой подписи"),
+        run_config("thread-period"),
+        durability="sync",
+    )
+    period_miss = await graph.aget_state(run_config("thread-period"))
+    assert interrupts_of(period_miss)
+    assert "Не нашёл такую строку" in period_miss.values["user_question"]
+    await graph.ainvoke(
+        Command(resume="2"),
+        run_config("thread-period"),
+        durability="sync",
+    )
+    period = await graph.aget_state(run_config("thread-period"))
+    assert not interrupts_of(period)
+    assert period.values["satisfactory"] is True
+    assert "Назовите период." not in (period.values.get("draft") or "")
+    assert "Не смог выбрать строку" not in (period.values.get("draft") or "")
+    assert "clarify" not in period.values.get("gaps", [])
+    cited = [
+        (item["period_id"], item["value"], item["cell"]) for item in period.values["citations"]
+    ]
+    assert cited == [("2029", "1.10", "C9"), ("2030", "1.25", "C10")]
+    assert "DSCR лимит в 2029: 1.10" in period.values["draft"]
+    assert "DSCR лимит в 2030: 1.25" in period.values["draft"]
+    catalog_before = len(parser.catalog_calls)
+    plans_before = len(_seen(model, "plan"))
+    await graph.ainvoke(
+        new_turn_input("в 2030", "job-1"),
+        run_config("thread-period"),
+        durability="sync",
+    )
+    narrowed = await graph.aget_state(run_config("thread-period"))
+    assert not interrupts_of(narrowed)
+    assert "Какую строку" not in (narrowed.values.get("draft") or "")
+    assert narrowed.values["satisfactory"] is True
+    assert [(item["period_id"], item["value"]) for item in narrowed.values["citations"]] == [
+        ("2030", "1.25"),
+    ]
+    assert "2029" not in narrowed.values["draft"]
+    assert len(parser.catalog_calls) == catalog_before
+    assert len(_seen(model, "plan")) == plans_before
 
 
 @pytest.mark.asyncio
@@ -667,7 +881,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
     model = ScriptedModel()
-    model.push("about", {"about": "row"})
+    model.push("about", {"acts": ["row"]})
     graph = _graph(parser, model)
     await _run(graph, "ZZZ?")
     snap = await graph.aget_state(run_config("thread-1"))
@@ -680,7 +894,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert len(_seen(model, "about")) == 1
     assert parser.context_calls == []
     parser.context = _book_document()
-    model.push("about", {"about": "book"})
+    model.push("about", {"acts": ["book"]})
     await graph.ainvoke(
         Command(resume="Расскажи по модель ! дай саммари по ней"),
         run_config("thread-1"),
@@ -692,6 +906,225 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert resumed.values["gaps"] == []
     assert "CPI" in resumed.values["draft"]
     assert "Не смог выбрать строку" not in resumed.values["draft"]
+    heard = len(parser.context_calls)
+    parser.summary = {
+        "source_filename": "packt-project-finance.xlsx",
+        "formula_count": 99,
+        "sheets": ["A", "B"],
+        "marker": "passport",
+    }
+    parser.jobs = [{"job_id": "job-1", "source_filename": "packt-project-finance.xlsx"}]
+    model.push("about", {"acts": ["chitchat"]})
+    await graph.ainvoke(
+        new_turn_input("Привет", "job-1"),
+        run_config("thread-chat"),
+        durability="sync",
+    )
+    greeting = await graph.aget_state(run_config("thread-chat"))
+    introduction = chitchat_reply()
+    assert "finance-context-agent" in introduction
+    assert "формулу из кэша" in introduction
+    assert not interrupts_of(greeting)
+    assert greeting.values["satisfactory"] is True
+    assert greeting.values["draft"] == introduction
+    assert "packt-project-finance.xlsx" not in greeting.values["draft"]
+    assert "99" not in greeting.values["draft"]
+    assert "Лист" not in greeting.values["draft"]
+    assert not any(char.isdigit() for char in greeting.values["draft"])
+    assert parser.observation_calls == []
+    assert len(parser.context_calls) == heard
+    model.push("about", {"acts": ["chitchat"]})
+    await graph.ainvoke(
+        new_turn_input("что ты умеешь?", "job-1"),
+        run_config("thread-able"),
+        durability="sync",
+    )
+    able = await graph.aget_state(run_config("thread-able"))
+    assert able.values["draft"] == greeting.values["draft"]
+    assert len(parser.context_calls) == heard
+    model.push("about", "bad")
+    await graph.ainvoke(
+        new_turn_input("Спасибо", "job-1"),
+        run_config("thread-chat"),
+        durability="sync",
+    )
+    thanks = await graph.aget_state(run_config("thread-chat"))
+    assert thanks.values["draft"] == greeting.values["draft"]
+    assert "CPI" not in thanks.values["draft"]
+    assert len(parser.context_calls) == heard
+    assert parser.observation_calls == []
+    model.push("about", {"acts": ["chitchat"]})
+    await graph.ainvoke(
+        new_turn_input("Привет"),
+        run_config("thread-bare"),
+        durability="sync",
+    )
+    bare = await graph.aget_state(run_config("thread-bare"))
+    assert not interrupts_of(bare)
+    assert bare.values["draft"] == introduction
+    assert bare.values.get("job_id") in (None, "")
+    assert "Какую книгу открыть?" not in bare.values["draft"]
+    assert len(parser.context_calls) == heard
+    parser.jobs = [
+        {"job_id": "job-1", "source_filename": "packt-project-finance.xlsx"},
+        {"job_id": "job-2", "source_filename": "rvi-project-finance.xlsx"},
+    ]
+    model.push("about", {"acts": ["books"]})
+    listed = len(parser.list_calls)
+    await graph.ainvoke(
+        new_turn_input("какие данные у тебя есть?", "job-1"),
+        run_config("thread-books"),
+        durability="sync",
+    )
+    inventory = await graph.aget_state(run_config("thread-books"))
+    assert not interrupts_of(inventory)
+    assert inventory.values["draft"] == books_reply(parser.jobs)
+    assert "packt-project-finance.xlsx" in inventory.values["draft"]
+    assert "rvi-project-finance.xlsx" in inventory.values["draft"]
+    assert "Такой строки нет" not in inventory.values["draft"]
+    assert not any(char.isdigit() for char in inventory.values["draft"])
+    assert len(parser.context_calls) == heard
+    assert len(parser.list_calls) == listed + 1
+    model.push("about", {"acts": ["row"]})
+    await _run(graph, "QQQ?", thread="thread-leave")
+    searched = len(parser.catalog_calls)
+    model.push("about", {"acts": ["chitchat"]})
+    await graph.ainvoke(
+        Command(resume="привет"),
+        run_config("thread-leave"),
+        durability="sync",
+    )
+    left = await graph.aget_state(run_config("thread-leave"))
+    assert not interrupts_of(left)
+    assert left.values["draft"] == introduction
+    assert left.values["question"] == "привет"
+    assert left.values["user_question"] == ""
+    assert len(parser.catalog_calls) == searched
+    model.push("about", {"acts": ["row"]})
+    await _run(graph, "RRR?", thread="thread-label")
+    model.push("about", {"acts": ["row"]})
+    model.push("about", {"acts": ["row"]})
+    await graph.ainvoke(
+        Command(resume="CAPEX"),
+        run_config("thread-label"),
+        durability="sync",
+    )
+    labeled = await graph.aget_state(run_config("thread-label"))
+    assert [call["q"] for call in parser.catalog_calls].count("CAPEX") == 1
+    assert labeled.values["question"] == "RRR?"
+    assert labeled.values["draft"] != introduction
+    overview = book_overview(parser.context)
+    about_before = len(_seen(model, "about"))
+    catalog_before = len(parser.catalog_calls)
+    await graph.ainvoke(
+        new_turn_input("packt-project-finance.xlsx"),
+        run_config("thread-bare-file"),
+        durability="sync",
+    )
+    opened = await graph.aget_state(run_config("thread-bare-file"))
+    assert not interrupts_of(opened)
+    assert opened.values["job_id"] == "job-1"
+    assert parser.context_calls[-1] == "job-1"
+    assert opened.values["draft"] == overview
+    assert opened.values["draft"] != books_reply(parser.jobs)
+    assert "Готовые книги:" not in opened.values["draft"]
+    assert len(_seen(model, "about")) == about_before
+    assert len(parser.catalog_calls) == catalog_before
+    model.push("about", {"acts": ["books"]})
+    await graph.ainvoke(
+        new_turn_input("дай саммари по packt-project-finance.xlsx"),
+        run_config("thread-summary"),
+        durability="sync",
+    )
+    summary = await graph.aget_state(run_config("thread-summary"))
+    assert summary.values["draft"] == overview
+    assert summary.values["job_id"] == "job-1"
+    assert "Готовые книги:" not in summary.values["draft"]
+    assert len(parser.catalog_calls) == catalog_before
+    model.push("about", {"acts": ["books"]})
+    await graph.ainvoke(
+        new_turn_input("что в книге packt-project-finance.xlsx ?"),
+        run_config("thread-contents"),
+        durability="sync",
+    )
+    contents = await graph.aget_state(run_config("thread-contents"))
+    assert contents.values["draft"] == overview
+    assert contents.values["job_id"] == "job-1"
+    assert len(parser.catalog_calls) == catalog_before
+    heard_books = len(parser.context_calls)
+    model.push("about", {"acts": ["books"]})
+    await graph.ainvoke(
+        new_turn_input("какие книги ?"),
+        run_config("thread-which"),
+        durability="sync",
+    )
+    which = await graph.aget_state(run_config("thread-which"))
+    assert not interrupts_of(which)
+    assert which.values["awaiting"] == ""
+    assert which.values["draft"] == books_reply(parser.jobs)
+    assert len(parser.context_calls) == heard_books
+    parser.pages[("job-1", "dscr")] = page([catalog_row("row-dscr", "DSCR")])
+    parser.observations[("job-1", "row-dscr")] = [
+        observation("row-dscr", "2030", "1.25", "C10", label="DSCR")
+    ]
+    model.push("about", {"acts": ["row"]})
+    await graph.ainvoke(
+        new_turn_input("DSCR в packt-project-finance.xlsx"),
+        run_config("thread-dscr-file"),
+        durability="sync",
+    )
+    dscr = await graph.aget_state(run_config("thread-dscr-file"))
+    assert any(
+        call["q"] == "DSCR" and call["job_id"] == "job-1" for call in parser.catalog_calls
+    )
+    assert not any("packt" in call["q"].casefold() for call in parser.catalog_calls)
+    assert "Готовые книги:" not in (dscr.values.get("draft") or "")
+    assert dscr.values["satisfactory"] is True
+    assert dscr.values["citations"][0]["row_key"] == "row-dscr"
+    both_about = len(_seen(model, "about"))
+    await graph.ainvoke(
+        new_turn_input("packt-project-finance.xlsx и rvi-project-finance.xlsx"),
+        run_config("thread-both"),
+        durability="sync",
+    )
+    both = await graph.aget_state(run_config("thread-both"))
+    assert interrupts_of(both)
+    assert "Какую книгу открыть?" in both.values["user_question"]
+    assert "packt-project-finance.xlsx" in both.values["user_question"]
+    assert "rvi-project-finance.xlsx" in both.values["user_question"]
+    assert both.values.get("draft") != books_reply(parser.jobs)
+    assert len(_seen(model, "about")) == both_about
+    model.push("about", {"acts": ["chitchat"]})
+    hello_context = len(parser.context_calls)
+    await graph.ainvoke(
+        new_turn_input("привет", "job-1"),
+        run_config("thread-hello-slot"),
+        durability="sync",
+    )
+    hello = await graph.aget_state(run_config("thread-hello-slot"))
+    assert hello.values["draft"] == introduction
+    assert "packt-project-finance.xlsx" not in hello.values["draft"]
+    assert "rvi-project-finance.xlsx" not in hello.values["draft"]
+    assert len(parser.context_calls) == hello_context
+    model.push("about", {"acts": ["row"]})
+    await graph.ainvoke(
+        new_turn_input("Какой DSCR?"),
+        run_config("thread-pick"),
+        durability="sync",
+    )
+    menu = await graph.aget_state(run_config("thread-pick"))
+    assert interrupts_of(menu)
+    assert "Какую книгу открыть?" in menu.values["user_question"]
+    await graph.ainvoke(
+        Command(resume="открой packt-project-finance.xlsx"),
+        run_config("thread-pick"),
+        durability="sync",
+    )
+    picked = await graph.aget_state(run_config("thread-pick"))
+    assert picked.values["job_id"] == "job-1"
+    assert any(call["q"] == "DSCR" and call["job_id"] == "job-1" for call in parser.catalog_calls)
+    assert picked.values["satisfactory"] is True
+    assert picked.values["citations"][0]["row_key"] == "row-dscr"
 
 
 def _book_document() -> dict:
@@ -948,9 +1381,6 @@ async def test_two_dscr_rows_resume_cites_the_chosen_row() -> None:
             catalog_row("row-lim", "DSCR лимит", concept="dscr.limit", sheet="Limits"),
         ]
     )
-    parser.pages[("job-1", "dscr наблюдённый")] = page(
-        [catalog_row("row-obs", "DSCR наблюдённый", concept="dscr.observed")]
-    )
     parser.observations[("job-1", "row-obs")] = [
         observation("row-obs", "2030", "1.25", "C10", label="DSCR наблюдённый")
     ]
@@ -960,12 +1390,8 @@ async def test_two_dscr_rows_resume_cites_the_chosen_row() -> None:
     paused = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(paused)
     assert "999" not in paused.values["user_question"]
-    model.push("plan", plan(["DSCR наблюдённый"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
-    )
     await graph.ainvoke(
-        Command(resume="Наблюдённый, не лимит"),
+        Command(resume="1"),
         run_config("thread-1"),
         durability="sync",
     )
@@ -973,33 +1399,43 @@ async def test_two_dscr_rows_resume_cites_the_chosen_row() -> None:
     assert snap.values["satisfactory"] is True
     assert snap.values["citations"][0]["row_key"] == "row-obs"
     assert snap.values["citations"][0]["cell"] == "C10"
-    assert "Наблюдённый" in _seen(model, "plan")[-1]["user"]
+    assert _seen(model, "plan") == []
 
 
 @pytest.mark.asyncio
 async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
     parser = FakeParser()
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
-    parser.observations[("job-1", "row-dscr")] = [
-        observation("row-dscr", "2030", "1.25", "C10", label="DSCR")
-    ]
+    stored = observation("row-dscr", "2030", "1.25", "C10", label="DSCR")
+    stored["formula"]["text"] = "=H10/I10"
+    parser.observations[("job-1", "row-dscr")] = [stored]
     model = ScriptedModel()
     graph = _graph(parser, model)
     await _run(graph, "Какой DSCR в 2030?")
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}], "explain", "precedents"))
-    model.push("answer", answer("1.25, вход A1", [cite("row-dscr", "2030", "1.25", "C10")]))
+    searched = len(parser.catalog_calls)
     await graph.ainvoke(
         new_turn_input("А почему?", "job-1"), run_config("thread-1"), durability="sync"
     )
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
     assert snap.values["satisfactory"] is True
-    follow = _seen(model, "plan")[-1]["user"]
-    assert "А почему?" in follow
-    assert '"question": "А почему?"' in follow
-    assert '"human_reply": ""' in follow
-    assert "row-dscr" in follow
+    assert "=H10/I10" in snap.values["draft"]
+    assert "1.25" in snap.values["draft"]
+    assert _seen(model, "plan") == []
+    assert _seen(model, "answer") == []
+    assert len(parser.catalog_calls) == searched
     assert parser.observation_calls[-1]["precedent_depth"] == 2
+    assert parser.observation_calls[-1]["row_key"] == "row-dscr"
+    fetched = len(parser.observation_calls)
+    model.push("about", {"acts": ["chitchat"]})
+    await graph.ainvoke(
+        new_turn_input("Спасибо", "job-1"), run_config("thread-1"), durability="sync"
+    )
+    thanks = await graph.aget_state(run_config("thread-1"))
+    assert thanks.values["draft"] == chitchat_reply()
+    assert "finance-context-agent" in thanks.values["draft"]
+    assert "1.25" not in thanks.values["draft"]
+    assert len(parser.observation_calls) == fetched
 
 
 @pytest.mark.asyncio
@@ -1513,8 +1949,8 @@ async def test_ungrounded_overview_publishes_the_book_passport() -> None:
     parser.context = _book_document()
     question = "Расскажи по модели ! дай саммари по ней"
     model = ScriptedModel()
-    model.push("about", {"about": "book"})
-    model.push("about", {"about": "book"})
+    model.push("about", {"acts": ["book"]})
+    model.push("about", {"acts": ["chitchat", "book"]})
     graph = _graph(parser, model)
     await _run(graph, question)
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1561,10 +1997,10 @@ async def test_ungrounded_overview_publishes_the_book_passport() -> None:
         assert piece not in draft
     about = _seen(model, "about")
     assert len(about) == 1
-    assert "не открывает одну строку" in about[0]["system"]
+    assert "Верни все подходящие акты" in about[0]["system"]
     assert "Расскажи" not in about[0]["system"]
     assert "саммари" not in about[0]["system"]
-    assert about[0]["user"] == question
+    assert json.loads(about[0]["user"]) == {"files": [], "reply": question}
     assert _seen(model, "plan") == []
     phrase = "Расскажи дай саммари ней"
     assert [call["q"] for call in parser.catalog_calls].count(phrase) == 1

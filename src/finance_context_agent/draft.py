@@ -48,16 +48,15 @@ def cache_answer(state: dict[str, Any]) -> dict[str, Any]:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in scoped:
             grouped.setdefault(str(item.get("row_key")), []).append(item)
-        one_each = len(grouped) == len(selected) and all(
-            len(items) == 1 for items in grouped.values()
-        )
-        if not one_each:
+        if any(not grouped.get(str(row.get("row_key"))) for row in selected):
             return {
                 "draft": "Подтверждённого числа в срезе нет.",
                 "citations": [],
                 "missing": True,
             }
-        ordered = [grouped[str(row.get("row_key"))][0] for row in selected]
+        ordered = []
+        for row in selected:
+            ordered.extend(grouped[str(row.get("row_key"))])
     explain = _explains(state)
     lines: list[str] = []
     citations: list[dict[str, Any]] = []

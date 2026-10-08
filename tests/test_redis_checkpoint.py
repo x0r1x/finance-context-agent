@@ -17,12 +17,9 @@ from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
     FakeParser,
     ScriptedModel,
-    answer,
     catalog_row,
-    cite,
     observation,
     page,
-    plan,
     year_axes,
 )
 
@@ -99,9 +96,6 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
             catalog_row("row-lim", "DSCR лимит", concept="dscr.limit", sheet="Limits"),
         ]
     )
-    parser.pages[("job-1", "dscr наблюдённый")] = page(
-        [catalog_row("row-obs", "DSCR наблюдённый", concept="dscr.observed")]
-    )
     parser.observations[("job-1", "row-obs")] = [
         observation("row-obs", "2030", "1.25", "C10", label="DSCR наблюдённый")
     ]
@@ -118,14 +112,10 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
         paused = await graph.aget_state(config)
         assert paused.next
 
-    model.push("plan", plan(["DSCR наблюдённый"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-obs", "2030", "1.25", "C10")])
-    )
     async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
         graph = build_graph(parser, model, saver)
-        await graph.ainvoke(Command(resume="Наблюдённый, не лимит"), config, durability="sync")
+        await graph.ainvoke(Command(resume="DSCR наблюдённый"), config, durability="sync")
         done = await graph.aget_state(config)
     assert done.values["satisfactory"] is True
     assert done.values["citations"][0]["row_key"] == "row-obs"

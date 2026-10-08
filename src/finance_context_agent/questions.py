@@ -107,6 +107,42 @@ def question_needles(question: str, axes: list[dict[str, Any]]) -> list[str]:
     return needles
 
 
+_FILE_EXTENSIONS = frozenset({"xlsx", "xlsm"})
+_NAME_SPLIT = re.compile(r"[^0-9A-Za-zА-Яа-яЁё]+")
+
+
+def name_tokens(text: str) -> list[str]:
+    """Pieces of a filename or a reply, split on everything that is not a letter or digit."""
+    return [part for part in _NAME_SPLIT.split(text.casefold()) if part]
+
+
+def file_segments(name: str) -> list[str]:
+    """Stem pieces of a workbook name. The extension is not a name."""
+    return [part for part in name_tokens(name) if part not in _FILE_EXTENSIONS]
+
+
+def remainder_needles(
+    question: str, names: list[str], axes: list[dict[str, Any]]
+) -> list[str]:
+    """Needles left after the named workbook is removed."""
+    text = question
+    segments: list[str] = []
+    for name in names:
+        cleaned = name.strip()
+        if not cleaned:
+            continue
+        text = re.sub(re.escape(cleaned), " ", text, flags=re.IGNORECASE)
+        segments.extend(file_segments(cleaned))
+    for segment in sorted(set(segments), key=len, reverse=True):
+        text = re.sub(
+            rf"(?<![0-9A-Za-zА-Яа-яЁё]){re.escape(segment)}(?![0-9A-Za-zА-Яа-яЁё])",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+    return question_needles(text, axes)
+
+
 def _strip_cover(question: str) -> tuple[str, bool]:
     text = question
     hit = False
@@ -146,6 +182,30 @@ def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
     if question_mention(left, axes) and question_mention(right, axes):
         return _split_and(left, axes) + _split_and(right, axes)
     return [piece]
+
+
+def books_reply(jobs: list[dict[str, Any]]) -> str:
+    """Finished filenames only. No sheet list and no cell figures."""
+    lines = ["Готовые книги:"]
+    for job in jobs:
+        name = str(job.get("source_filename") or job.get("job_id") or "").strip()
+        if name:
+            lines.append(f"- {name}")
+    return "\n".join(lines)
+
+
+def chitchat_reply() -> str:
+    """Who the agent is. No book name, no sheet list, and no cell figures."""
+    return "\n".join(
+        [
+            "Я finance-context-agent.",
+            "Читаю сохранённые числа книги и отвечаю только по ним.",
+            "Могу найти строку по подписи, показать её по периодам, "
+            "сузить до названного периода и объяснить формулу из кэша.",
+            "Обзор книги даю, когда о нём просят.",
+            "Напишите, что посмотреть.",
+        ]
+    )
 
 
 def cover_question(summary: dict[str, Any]) -> str:
