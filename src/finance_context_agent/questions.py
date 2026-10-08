@@ -6,6 +6,7 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from finance_context_agent.catalog import _keeps_longer
 from finance_context_agent.text_numbers import display_cached, fold_decimal, scale_display
 
 _MENTION_STOP = frozenset(
@@ -138,6 +139,33 @@ def contained_labels(text: str, rows: list[dict[str, Any]]) -> list[dict[str, An
                 dropped.add(index)
                 break
     return [row for index, row in enumerate(matched) if index not in dropped]
+
+
+def same_line(hits: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A single contained label also offers the longer line that continues it.
+
+    Two different labels in one reply stay as they are. A longer label is the
+    same line when it starts with the short one or ends with it in parentheses.
+    """
+    labels: list[str] = []
+    for row in hits:
+        label = str(row.get("label") or "").strip().casefold()
+        if label and label not in labels:
+            labels.append(label)
+    if len(labels) != 1:
+        return hits
+    needle = labels[0]
+    widened: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        other = str(row.get("label") or "").strip()
+        key = str(row.get("row_key") or "")
+        if not other or not key or key in seen:
+            continue
+        if other.casefold() == needle or _keeps_longer(other, needle):
+            seen.add(key)
+            widened.append(row)
+    return widened or hits
 
 
 def shortlist_rows(

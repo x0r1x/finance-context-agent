@@ -83,10 +83,12 @@ def _choice(body: Any, criteria: dict[str, str]) -> Choice:
 def _pick(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ModelError("ranker schema")
-    questions = body.get("questions")
-    if not isinstance(questions, dict):
+    scored = body.get("questions")
+    if not isinstance(scored, dict):
+        scored = body.get("answers")
+    if not isinstance(scored, dict):
         raise ModelError("ranker schema")
-    pick = questions.get("pick")
+    pick = scored.get("pick")
     if not isinstance(pick, dict):
         raise ModelError("ranker schema")
     return pick

@@ -2114,6 +2114,44 @@ async def test_two_contained_labels_are_both_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_short_label_menus_the_longer_line() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    long = "Operating Income or Loss (EBITDA)"
+    parser.rows["job-1"] = [
+        catalog_row("long", long, sheet="PF Model", label_path=["Income Statement"]),
+        catalog_row("short", "EBITDA", sheet="PF Model", label_path=["Taxable income"]),
+    ]
+    ranker = FakeRanker()
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "Какой EBITDA в 2030?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    question = snap.values["user_question"]
+    assert interrupts_of(snap)
+    assert ranker.calls == []
+    assert long in question
+    assert "Лист PF Model" in question
+    assert "№2 EBITDA" in question
+
+
+@pytest.mark.asyncio
+async def test_absent_label_stays_a_pause_when_the_book_action_is_weak() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = [catalog_row("e", "EBITDA")]
+    parser.context = _book_document()
+    ranker = FakeRanker()
+    ranker.push("book", {"book": 0.52, "books": 0.26, "intro": 0.13, "none": 0.09})
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "Какой DSCR?")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(snap)
+    assert "Такой строки нет" in snap.values["user_question"]
+    assert parser.context_calls == []
+    assert "none" in ranker.calls[0]["criteria"]
+
+
+@pytest.mark.asyncio
 async def test_ranker_picks_the_row_when_the_full_label_is_absent() -> None:
     parser = FakeParser()
     parser.axes = year_axes()

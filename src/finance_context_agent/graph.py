@@ -40,6 +40,7 @@ from finance_context_agent.questions import (
     is_cover,
     name_tokens,
     remainder_needles,
+    same_line,
     shortlist_rows,
 )
 from finance_context_agent.settings import Settings
@@ -159,6 +160,10 @@ def build_graph(
             return found
         hits = contained_labels(text, found)
         if hits:
+            line = same_line(hits, found)
+            hit_keys = {str(row.get("row_key")) for row in hits}
+            if {str(row.get("row_key")) for row in line} != hit_keys:
+                return _label_menu(line)
             return _from_hits(state, hits, named, settings)
         if not reply and is_cover(question):
             return _ask(state, cover_question(state.get("summary") or {}), settings=settings) | {
@@ -1104,6 +1109,9 @@ async def _rank_labels(
     criteria["books"] = "Спросить, какие книги есть."
     criteria["book"] = "Попросить обзор открытой книги."
     criteria["intro"] = "Реплика про самого агента."
+    # No catalog row: without this line the three dialog actions are the whole choice.
+    if not short:
+        criteria["none"] = "Подходящей строки нет."
     choice = await ranker.choose(_ranker_state(state, text), criteria)
     decision = decide_margin(choice.probabilities, set(by_key), menu_open=False)
     if decision.get("act") == "take":
@@ -1117,7 +1125,8 @@ async def _rank_labels(
             return await _overview_of(parser, str(state.get("job_id") or ""))
         if key == "intro":
             return _agent_reply()
-        raise ModelError("ranker choice")
+        if key != "none":
+            raise ModelError("ranker choice")
     if decision.get("act") == "menu":
         rows = [by_key[key] for key in decision.get("keys") or [] if key in by_key]
         if rows:
