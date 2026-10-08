@@ -34,6 +34,7 @@ A row the parser left without a concept is still found by its label. Its `concep
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/), or Docker.
 - finance-context-builder listening on `http://127.0.0.1:8080`, with the job in `succeeded`.
 - An OpenAI-compatible model on `http://127.0.0.1:1234/v1`. LM Studio on the host is the expected server.
+- A CLM ranker speaking `POST /v1/systemone` on `http://127.0.0.1:8700`. The agent does not start it. Gemma stays the chat model.
 - Redis 8 for dialog checkpoints. `docker compose` starts it. A host process needs a Redis you can reach at `REDIS_URL`.
 
 ## Environment
@@ -47,6 +48,9 @@ A row the parser left without a concept is still found by its label. Its `concep
 | `LLM_MODEL` | `local` | Model name sent to the LLM server |
 | `LLM_TIMEOUT_SEC` | `60` | Model HTTP timeout, seconds. Greater than 0 |
 | `LLM_TEMPERATURE` | `0` | Sampling temperature, from 0 to 2 |
+| `RANKER_BASE_URL` | `http://127.0.0.1:8700/v1/systemone` | CLM choice. Inside the container a loopback host is rewritten to `host.docker.internal`. The path is kept |
+| `RANKER_API_KEY` | empty | Sent as `Authorization: Bearer …` when set |
+| `RANKER_MODEL` | `clm-latest` | Model name sent to the ranker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Dialog checkpoints. An unset Compose value is `redis://:devpassword@redis:6379/0`. `REDIS_PASSWORD` changes that password |
 | `HOST` | `0.0.0.0` | Bind address of the process. Compose always sets `0.0.0.0` |
 | `PORT` | `8090` | Bind port of the process |
@@ -63,7 +67,7 @@ A row the parser left without a concept is still found by its label. Its `concep
 | `DEPENDENT_OBSERVATION_LIMIT` | `8` | Observations requested per dependent row, from 1 to 48 |
 | `LANGGRAPH_STRICT_MSGPACK` | `true` | Strict checkpoint serialization |
 
-Copy `.env.example` to `.env` to override a default. `uv run` and Compose both read that file. The file is optional for Compose. A blank value keeps the default. A value in the file replaces the default. A number outside the range in the table stops the process at startup. The process environment wins over `.env`. An unset `REDIS_URL` is `redis://:devpassword@redis:6379/0` inside Compose. `REDIS_PASSWORD` is the password of that Redis. Inside the container, loopback hosts of the parser and the model become `host.docker.internal`.
+Copy `.env.example` to `.env` to override a default. `uv run` and Compose both read that file. The file is optional for Compose. A blank value keeps the default. A value in the file replaces the default. A number outside the range in the table stops the process at startup. The process environment wins over `.env`. An unset `REDIS_URL` is `redis://:devpassword@redis:6379/0` inside Compose. `REDIS_PASSWORD` is the password of that Redis. Inside the container, loopback hosts of the parser, the model, and the ranker become `host.docker.internal`.
 
 The public `model` field of a completion is always `finance-context-agent`. `LLM_MODEL` is only the name sent upstream.
 

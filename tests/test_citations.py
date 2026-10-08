@@ -38,6 +38,20 @@ def test_number_outside_citation_and_period_fails() -> None:
     assert "number:7" in gaps
 
 
+def test_digit_inside_a_period_id_is_cited() -> None:
+    obs = observation("row", "scenario-4", "300000000", "C10")
+    citation = {
+        "row_key": "row",
+        "period_id": "scenario-4",
+        "cell": "C10",
+        "value": "300000000",
+    }
+    gaps = _check("CAPEX в scenario-4: 300000000", [citation], [obs])
+    assert gaps == []
+    stray = _check("CAPEX в scenario-4: 300000000 и ещё 7", [citation], [obs])
+    assert "number:7" in stray
+
+
 def test_period_token_that_is_not_numeric_is_not_a_number() -> None:
     obs = observation("row", "Y5", "1.5", "C10")
     gaps = _check(

@@ -89,6 +89,100 @@ def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
     return " ".join(tokens)
 
 
+PICK_FLOOR = 0.55
+PICK_GAP = 0.15
+MENU_FLOOR = 0.25
+SHORTLIST_CAP = 24
+MENU_CAP = 8
+
+_WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
+
+
+def _bounded(haystack: str, needle: str) -> bool:
+    """True when needle sits in haystack with a non-letter on each side."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        found = haystack.find(needle, start)
+        if found < 0:
+            return False
+        end = found + len(needle)
+        before = found == 0 or not haystack[found - 1].isalnum()
+        after = end == len(haystack) or not haystack[end].isalnum()
+        if before and after:
+            return True
+        start = found + 1
+
+
+def contained_labels(text: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows whose label is a bounded piece of the reply.
+
+    A shorter label is dropped when a longer matched label contains it.
+    """
+    folded = text.casefold()
+    matched: list[dict[str, Any]] = []
+    folded_labels: list[str] = []
+    for row in rows:
+        label = str(row.get("label") or "").strip().casefold()
+        if not label or not _bounded(folded, label):
+            continue
+        matched.append(row)
+        folded_labels.append(label)
+    dropped: set[int] = set()
+    for index, label in enumerate(folded_labels):
+        for other_index, other in enumerate(folded_labels):
+            if other_index == index or len(other) <= len(label):
+                continue
+            if _bounded(other, label):
+                dropped.add(index)
+                break
+    return [row for index, row in enumerate(matched) if index not in dropped]
+
+
+def shortlist_rows(
+    text: str, rows: list[dict[str, Any]], cap: int = SHORTLIST_CAP
+) -> list[dict[str, Any]]:
+    """Rows whose label contains a word of the reply. Highest overlap first."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in _WORD.findall(text.casefold()):
+        if len(word) < 3 or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        label = str(row.get("label") or "").casefold()
+        hits = sum(1 for word in words if _bounded(label, word))
+        if hits:
+            scored.append((hits, -index, row))
+    scored.sort(reverse=True)
+    return [row for _hits, _index, row in scored[:cap]]
+
+
+def decide_margin(
+    probabilities: dict[str, float],
+    keys: set[str],
+    *,
+    menu_open: bool,
+) -> dict[str, Any]:
+    """Take a winner, keep an open menu, or offer the rows that cleared the floor."""
+    if not probabilities:
+        return {"act": "again"} if menu_open else {"act": "miss"}
+    ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+    winner, best = ordered[0]
+    second = ordered[1][1] if len(ordered) > 1 else 0.0
+    if best >= PICK_FLOOR and best - second >= PICK_GAP:
+        return {"act": "take", "key": str(winner)}
+    if menu_open:
+        return {"act": "again"}
+    ranked = [str(key) for key, score in ordered if key in keys and score >= MENU_FLOOR]
+    if ranked:
+        return {"act": "menu", "keys": ranked[:MENU_CAP]}
+    return {"act": "miss"}
+
+
 def asks_how(question: str) -> bool:
     """True when the sentence asks how a row is calculated. The row name stays outside."""
     folded = question.casefold()

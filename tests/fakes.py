@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from finance_context_agent.llm import ModelError, SchemaError
-from finance_context_agent.parser import ParserError
+from finance_context_agent.clients.llm import ModelError, SchemaError
+from finance_context_agent.clients.parser import ParserError
+from finance_context_agent.clients.ranker import Choice
 
 
 def catalog_row(
@@ -172,6 +173,8 @@ class FakeParser:
         self.traces: dict[tuple[str, str], dict[str, Any]] = {}
         self.observation_calls: list[dict[str, Any]] = []
         self.catalog_calls: list[dict[str, Any]] = []
+        self.rows: dict[str, list[dict[str, Any]]] = {}
+        self.list_row_calls: list[str] = []
         self.head_calls: list[str] = []
         self.head_etag: str | None = None
         self.context: dict[str, Any] | None = None
@@ -212,6 +215,24 @@ class FakeParser:
             "axes": self.axes,
             "rows": [{"row_key": "DISCARD_ROW", "label": "discard"}],
         }, self.book_etag
+
+    async def list_rows(self, job_id: str) -> list[dict[str, Any]]:
+        self._raise()
+        self.list_row_calls.append(job_id)
+        if job_id in self.rows:
+            return [dict(row) for row in self.rows[job_id]]
+        seen: set[str] = set()
+        ordered: list[dict[str, Any]] = []
+        for (found_id, _query), page in self.pages.items():
+            if found_id != job_id:
+                continue
+            for row in page.get("rows") or []:
+                key = str(row.get("row_key"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(row)
+        return ordered
 
     async def search_rows(self, job_id: str, q: str, *, limit: int = 8) -> dict[str, Any]:
         self._raise()
@@ -269,6 +290,32 @@ class FakeParser:
     def _raise(self) -> None:
         if self.error is not None:
             raise self.error
+
+
+class FakeRanker:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._queue: list[Any] = []
+
+    def push(self, key: str, probabilities: dict[str, float]) -> FakeRanker:
+        self._queue.append((key, probabilities))
+        return self
+
+    def fail(self) -> FakeRanker:
+        self._queue.append("boom")
+        return self
+
+    async def choose(self, state: str, criteria: dict[str, str]) -> Choice:
+        self.calls.append({"state": state, "criteria": dict(criteria)})
+        if not self._queue:
+            probs = {name: 0.01 for name in criteria}
+            first = next(iter(criteria), "intro")
+            return Choice(first, probs)
+        item = self._queue.pop(0)
+        if item == "boom":
+            raise ModelError("boom")
+        key, probabilities = item
+        return Choice(key, probabilities)
 
 
 class ScriptedModel:

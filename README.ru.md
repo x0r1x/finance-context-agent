@@ -34,6 +34,7 @@ Excel разбирает finance-context-builder. Загрузка остаёт�
 - Python 3.12+ и [uv](https://docs.astral.sh/uv/), либо Docker.
 - finance-context-builder на `http://127.0.0.1:8080`, джоба в статусе `succeeded`.
 - OpenAI-совместимая модель на `http://127.0.0.1:1234/v1`. Ожидаемый сервер — LM Studio на хосте.
+- Ранкер CLM на `POST /v1/systemone`, адрес `http://127.0.0.1:8700`. Агент его не стартует. Gemma остаётся чатом.
 - Redis 8 для снимков диалога. `docker compose` поднимает его сам. Процессу на хосте нужен Redis, доступный по `REDIS_URL`.
 
 ## Переменные
@@ -47,6 +48,9 @@ Excel разбирает finance-context-builder. Загрузка остаёт�
 | `LLM_MODEL` | `local` | Имя модели в запросе к серверу LLM |
 | `LLM_TIMEOUT_SEC` | `60` | Таймаут HTTP модели, секунды. Больше 0 |
 | `LLM_TEMPERATURE` | `0` | Температура выборки, от 0 до 2 |
+| `RANKER_BASE_URL` | `http://127.0.0.1:8700/v1/systemone` | Выбор CLM. Внутри контейнера loopback-хост переписывается на `host.docker.internal`. Путь сохраняется |
+| `RANKER_API_KEY` | пусто | Уходит как `Authorization: Bearer …`, если задан |
+| `RANKER_MODEL` | `clm-latest` | Имя модели в запросе ранкера |
 | `REDIS_URL` | `redis://localhost:6379/0` | Снимки диалогов. Незаданный в Compose `REDIS_URL` — `redis://:devpassword@redis:6379/0`. Пароль этого Redis — `REDIS_PASSWORD` |
 | `HOST` | `0.0.0.0` | Адрес процесса. Compose всегда ставит `0.0.0.0` |
 | `PORT` | `8090` | Порт процесса |
@@ -63,7 +67,7 @@ Excel разбирает finance-context-builder. Загрузка остаёт�
 | `DEPENDENT_OBSERVATION_LIMIT` | `8` | Наблюдений на одну зависимую строку, от 1 до 48 |
 | `LANGGRAPH_STRICT_MSGPACK` | `true` | Строгая сериализация снимка |
 
-Скопируйте `.env.example` в `.env`, чтобы заменить значение по умолчанию. `uv run` и Compose читают этот файл. Для Compose файл необязателен. Пустое значение оставляет дефолт. Значение из файла заменяет дефолт. Число вне диапазона из таблицы останавливает процесс при старте. Переменные процесса важнее `.env`. Незаданный `REDIS_URL` внутри Compose — `redis://:devpassword@redis:6379/0`. Пароль этого Redis — `REDIS_PASSWORD`. Внутри контейнера петлевые хосты парсера и модели становятся `host.docker.internal`.
+Скопируйте `.env.example` в `.env`, чтобы заменить значение по умолчанию. `uv run` и Compose читают этот файл. Для Compose файл необязателен. Пустое значение оставляет дефолт. Значение из файла заменяет дефолт. Число вне диапазона из таблицы останавливает процесс при старте. Переменные процесса важнее `.env`. Незаданный `REDIS_URL` внутри Compose — `redis://:devpassword@redis:6379/0`. Пароль этого Redis — `REDIS_PASSWORD`. Внутри контейнера петлевые хосты парсера, модели и ранкера становятся `host.docker.internal`.
 
 Публичное поле `model` в ответе всегда `finance-context-agent`. `LLM_MODEL` — только имя, которое уходит на сервер модели.
 

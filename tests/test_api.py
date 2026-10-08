@@ -8,13 +8,15 @@ from httpx import ASGITransport, AsyncClient
 from langgraph.checkpoint.memory import InMemorySaver
 
 from finance_context_agent.app import create_app
+from finance_context_agent.clients.lock import MemoryThreadLock
+from finance_context_agent.clients.parser import ParserError
+from finance_context_agent.clients.ranker import Choice
 from finance_context_agent.graph import build_graph
-from finance_context_agent.lock import MemoryThreadLock
-from finance_context_agent.parser import ParserError
 from finance_context_agent.session import derived_thread_id
 from finance_context_agent.turn import run_config
 from tests.fakes import (
     FakeParser,
+    FakeRanker,
     ScriptedModel,
     answer,
     catalog_row,
@@ -30,31 +32,14 @@ JOB = "job-1"
 _DERIVED = re.compile(r"^c[0-9a-f]{32}$")
 
 
-class GateModel:
-    def __init__(self) -> None:
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def complete_json(
-        self, *, role: str, system: str, user: str, options: list[str] | None = None
-    ) -> dict:
-        self.entered.set()
-        await self.release.wait()
-        if role == "plan":
-            return plan(["DSCR"], [{"year": "2030"}])
-        if role == "answer":
-            return answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-        return {"gaps": []}
-
-
 def _ready(parser: FakeParser, needle: str = "DSCR", key: str = "row-dscr") -> None:
     parser.axes = year_axes()
     parser.pages[(JOB, needle.casefold())] = page([catalog_row(key, needle)])
     parser.observations[(JOB, key)] = [observation(key, "2030", "1.25", "C10", label=needle)]
 
 
-def _app(parser: FakeParser, model):
-    graph = build_graph(parser, model, InMemorySaver())
+def _app(parser: FakeParser, model, ranker=None):
+    graph = build_graph(parser, model, InMemorySaver(), ranker=ranker or FakeRanker())
     app = create_app(graph=graph, lock=MemoryThreadLock(), parser=parser, redis=None)
     return app, graph
 
@@ -133,17 +118,9 @@ async def test_missing_thread_id_is_minted() -> None:
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
+    ranker = FakeRanker()
     question = "Какой DSCR в 2030?"
-    for _ in range(2):
-        model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-        model.push(
-            "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-        )
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
-    app, _graph = _app(parser, model)
+    app, _graph = _app(parser, model, ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
             "/v1/chat/completions",
@@ -162,8 +139,6 @@ async def test_missing_thread_id_is_minted() -> None:
             },
         )
         model.push("about", {"acts": ["chitchat"]})
-        model.push("about", {"acts": ["row"]})
-        model.push("about", {"acts": ["chitchat"]})
         hello = "привет"
         opened_hello = await client.post(
             "/v1/chat/completions",
@@ -181,6 +156,7 @@ async def test_missing_thread_id_is_minted() -> None:
                 ],
             },
         )
+        ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02})
         fresh_hello = await client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": hello}]},
@@ -289,19 +265,31 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
     assert derived_state.values["job_id"] == JOB
 
 
+class GateRanker:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def choose(self, state: str, criteria: dict[str, str]) -> Choice:
+        del state, criteria
+        self.entered.set()
+        await self.release.wait()
+        return Choice("intro", {"intro": 0.9, "books": 0.02, "book": 0.02})
+
+
 @pytest.mark.asyncio
 async def test_thread_busy_while_the_lock_is_held() -> None:
     parser = FakeParser()
     _ready(parser)
-    model = GateModel()
-    app, _graph = _app(parser, model)
+    ranker = GateRanker()
+    app, _graph = _app(parser, ScriptedModel(), ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         first = asyncio.create_task(client.post("/v1/chat/completions", json=_payload("Какой?")))
-        await model.entered.wait()
+        await ranker.entered.wait()
         second = await client.post("/v1/chat/completions", json=_payload("ещё"))
         assert second.status_code == 409
         assert second.json()["error"] == "thread_busy"
-        model.release.set()
+        ranker.release.set()
         finished = await first
     assert finished.status_code == 200
     assert finished.json()["satisfactory"] is True
@@ -312,12 +300,10 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push("answer", "boom")
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
-    app, graph = _app(parser, model)
+    ranker = FakeRanker()
+    ranker.fail()
+    ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02})
+    app, graph = _app(parser, model, ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
         assert failed.status_code == 503
@@ -334,9 +320,9 @@ async def test_model_error_is_logged_and_hidden(caplog: pytest.LogCaptureFixture
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push("answer", "boom")
-    app, _graph = _app(parser, model)
+    ranker = FakeRanker()
+    ranker.fail()
+    app, _graph = _app(parser, model, ranker)
     with caplog.at_level(logging.WARNING, logger="finance_context_agent.api"):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
             failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))

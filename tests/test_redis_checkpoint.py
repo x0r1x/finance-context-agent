@@ -10,12 +10,13 @@ import pytest
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
+from finance_context_agent.clients.lock import RedisThreadLock
 from finance_context_agent.graph import build_graph
-from finance_context_agent.lock import RedisThreadLock
 from finance_context_agent.settings import Settings
 from finance_context_agent.turn import new_turn_input, run_config
 from tests.fakes import (
     FakeParser,
+    FakeRanker,
     ScriptedModel,
     catalog_row,
     observation,
@@ -105,7 +106,7 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
 
     async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
-        graph = build_graph(parser, model, saver)
+        graph = build_graph(parser, model, saver, ranker=FakeRanker())
         await graph.ainvoke(
             new_turn_input("Какой DSCR в 2030?", "job-1"), config, durability="sync"
         )
@@ -114,7 +115,7 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
 
     async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
-        graph = build_graph(parser, model, saver)
+        graph = build_graph(parser, model, saver, ranker=FakeRanker())
         await graph.ainvoke(Command(resume="DSCR наблюдённый"), config, durability="sync")
         done = await graph.aget_state(config)
     assert done.values["satisfactory"] is True

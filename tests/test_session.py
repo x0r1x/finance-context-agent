@@ -26,6 +26,14 @@ def test_interrupt_resumes_with_the_user_text() -> None:
     assert payload.resume == "наблюдённый"
 
 
+def test_ask_user_without_an_interrupt_resumes_with_the_reply() -> None:
+    payload = decide_input(
+        _snap(values={"job_id": "job-1"}, nxt=("ask_user",)), "давай номер 1", "job-1"
+    )
+    assert isinstance(payload, Command)
+    assert payload.resume == "давай номер 1"
+
+
 def test_pending_node_continues_without_a_new_question() -> None:
     payload = decide_input(
         _snap(values={"job_id": "job-1"}, nxt=("answer",)), "другой вопрос", "job-1"

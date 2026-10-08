@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from finance_context_agent.parser import ParserClient, ParserError
+from finance_context_agent.clients.parser import ParserClient, ParserError
 
 
 class _Script:
@@ -101,6 +101,57 @@ async def test_trace_query_uses_from() -> None:
     assert "from=rk" in url
     assert "direction=dependents" in url
     assert "depth=2" in url
+    await parser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_rows_joins_pages_without_concept_or_query() -> None:
+    pages = {
+        0: [
+            {
+                "row_key": str(index),
+                "label": "CAPEX" if index == 0 else f"Row {index}",
+                "concept_id": "secret",
+                "sheet": "Input",
+                "label_path": ["COSTS"],
+                "axis_ids": ["a"],
+                "disposition": "fact",
+                "kind": "fact",
+            }
+            for index in range(1000)
+        ],
+        1000: [
+            {
+                "row_key": "tail",
+                "label": "DSCR",
+                "concept_id": "cov.dscr",
+                "sheet": "Ratios",
+                "label_path": [],
+                "axis_ids": [],
+                "disposition": "fact",
+                "kind": "fact",
+            },
+            {"row_key": "blank", "label": "  ", "concept_id": "hidden"},
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        assert "q=" not in url
+        offset = int(request.url.params["offset"])
+        body = pages.get(offset)
+        if body is None:
+            return httpx.Response(500, json={"error": "unexpected", "url": url})
+        return httpx.Response(200, json={"total": 1002, "rows": body})
+
+    parser = ParserClient(
+        "http://parser", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    rows = await parser.list_rows("job-1")
+    assert rows[0]["label"] == "CAPEX"
+    assert rows[-1]["row_key"] == "tail"
+    assert all("concept_id" not in row for row in rows)
+    assert len(rows) == 1001
     await parser.aclose()
 
 

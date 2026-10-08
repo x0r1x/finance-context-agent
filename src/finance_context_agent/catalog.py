@@ -135,6 +135,16 @@ def matching_rows(reply: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return found
 
 
+def menu_criterion(index: int, row: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    """One shown menu line plus its sheet and heading, for a closed choice."""
+    notes = _kind_notes(rows)
+    parts = [_choice_line(index, row)]
+    detail = _detail(row, notes.get(str(row.get("row_key")), ""))
+    if detail:
+        parts.append(detail)
+    return " ".join(parts)
+
+
 def menu_choices(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Shown items for a closed choice. No row key and no cell value."""
     notes = _kind_notes(rows)

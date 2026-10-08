@@ -11,10 +11,11 @@ from fastapi import FastAPI
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
 from finance_context_agent.api import router
+from finance_context_agent.clients.llm import OpenAIChat
+from finance_context_agent.clients.lock import RedisThreadLock
+from finance_context_agent.clients.parser import ParserClient
+from finance_context_agent.clients.ranker import RankerClient
 from finance_context_agent.graph import build_graph
-from finance_context_agent.llm import OpenAIChat
-from finance_context_agent.lock import RedisThreadLock
-from finance_context_agent.parser import ParserClient
 from finance_context_agent.settings import Settings
 
 
@@ -29,12 +30,18 @@ async def lifespan(app: FastAPI):
         timeout=settings.llm_timeout_sec,
         temperature=settings.llm_temperature,
     )
+    ranker = RankerClient(
+        settings.resolved_ranker_base_url(),
+        settings.ranker_api_key,
+        settings.ranker_model,
+        timeout=settings.parser_timeout_sec,
+    )
     redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     async with AsyncRedisSaver.from_conn_string(
         settings.redis_url, ttl=settings.saver_ttl()
     ) as checkpointer:
         await checkpointer.asetup()
-        app.state.graph = build_graph(parser, model, checkpointer, settings)
+        app.state.graph = build_graph(parser, model, checkpointer, settings, ranker)
         app.state.redis = redis
         app.state.lock = RedisThreadLock(redis, ttl_seconds=settings.lock_ttl_sec)
         app.state.parser = parser
@@ -44,6 +51,7 @@ async def lifespan(app: FastAPI):
         finally:
             await parser.aclose()
             await model.aclose()
+            await ranker.aclose()
             await redis.aclose()
 
 

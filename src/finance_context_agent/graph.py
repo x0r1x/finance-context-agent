@@ -10,22 +10,22 @@ from langgraph.types import interrupt
 
 from finance_context_agent.catalog import (
     MENU_INSTRUCTION,
+    _heading,
     compact_row,
     matching_rows,
+    menu_criterion,
     narrow_page,
     offered_labels,
     render_menu,
 )
 from finance_context_agent.citations import verify_answer, wants_influence
+from finance_context_agent.clients.llm import JsonModel, ModelError, SchemaError
+from finance_context_agent.clients.parser import ParserClient, ParserError
 from finance_context_agent.draft import cache_answer, scalar_observation
-from finance_context_agent.llm import JsonModel, SchemaError
-from finance_context_agent.parser import ParserClient, ParserError
 from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import (
     about_messages,
     answer_messages,
-    choose_messages,
-    plan_messages,
     without_account_code,
 )
 from finance_context_agent.questions import (
@@ -33,12 +33,14 @@ from finance_context_agent.questions import (
     book_overview,
     books_reply,
     chitchat_reply,
+    contained_labels,
     cover_question,
+    decide_margin,
     file_segments,
     is_cover,
     name_tokens,
-    question_needles,
     remainder_needles,
+    shortlist_rows,
 )
 from finance_context_agent.settings import Settings
 
@@ -95,8 +97,10 @@ def build_graph(
     model: JsonModel,
     checkpointer: Any,
     settings: Settings | None = None,
+    ranker: Any = None,
 ) -> Any:
     settings = settings or Settings()
+    label_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     async def load(state: dict[str, Any]) -> dict[str, Any]:
         if not state.get("job_id"):
@@ -136,65 +140,36 @@ def build_graph(
         axes = list(state.get("axes") or [])
         reply = str(state.get("human_reply") or "").strip()
         text = reply or question
-        needles = question_needles(text, axes)
         named = periods_from_question(text, axes)
         if reply and not named:
             named = periods_from_question(question, axes)
-        label_turn = bool(state.get("label_reply")) or state.get("user_question") == _MISSING_ROW
-        if reply and state.get("user_question") == _MISSING_ROW:
-            diverted = await _divert_label_reply(state, reply, model, parser)
-            if diverted is not None:
-                return diverted
         if ".xlsx" in text.casefold() or ".xlsm" in text.casefold():
             loaded = await _succeeded_jobs(parser)
             if isinstance(loaded, dict):
                 return loaded
-            if _named_jobs(text, loaded):
-                found = await _dialog_turn(
-                    text, state, model, parser, jobs=loaded, unbound_row="search"
-                )
-                if found is not None:
-                    return found
-        if needles and (not reply or label_turn):
-            blocked = _label_cap(state, len(needles), settings)
-            if blocked:
-                return blocked
-            return _question_plan(state, needles, named) | {"label_reply": False}
-        held = list(state.get("selected") or [])
-        if held and not needles and (named or asks_how(text)):
-            return _continue_selected(state, held, named, text, settings)
+            named_jobs = _named_jobs(text, loaded)
+            if len(named_jobs) > 1:
+                return _job_pause(loaded)
+            if len(named_jobs) == 1:
+                bound = await _bind_named_file(state, text, named_jobs[0], axes, parser)
+                if bound is not None:
+                    return bound
+        found = await _label_rows_for(state, parser, label_rows)
+        if isinstance(found, dict):
+            return found
+        hits = contained_labels(text, found)
+        if hits:
+            return _from_hits(state, hits, named, settings)
         if not reply and is_cover(question):
             return _ask(state, cover_question(state.get("summary") or {}), settings=settings) | {
-                "label_reply": True
+                "label_reply": True,
+                "draft_from_cache": False,
+                "cache_missing": False,
             }
-        system, user = plan_messages(state)
-        try:
-            parsed = await model.complete_json(role="plan", system=system, user=user)
-        except SchemaError:
-            return _done("Модель не вернула план.", ["schema"])
-        model_needles = [
-            str(item).strip() for item in parsed.get("needles") or [] if str(item).strip()
-        ]
-        blocked = _label_cap(state, len(model_needles), settings)
-        if blocked:
-            return blocked
-        periods = named or list(parsed.get("periods") or [])
-        return {
-            "content_steps": state.get("content_steps", 0) + 1,
-            "plan": {
-                "question_type": parsed.get("question_type") or "lookup",
-                "needles": model_needles,
-                "periods": periods,
-                "trace": parsed.get("trace") or "none",
-                "source": "model",
-            },
-            "human_reply": "",
-            "search_again": False,
-            "draft_from_cache": False,
-            "cache_missing": False,
-            "label_reply": False,
-            "terminal": "",
-        }
+        held = list(state.get("selected") or [])
+        if held and (named or asks_how(text)):
+            return _continue_selected(state, held, named, text, settings)
+        return await _rank_labels(state, text, found, ranker, parser, settings)
 
     async def search(state: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
@@ -252,7 +227,7 @@ def build_graph(
                 except ParserError as exc:
                     return _terminal_or_raise(exc)
             if offers:
-                return await _choose_offer({**state, "offers": offers}, settings, model)
+                return await _choose_offer({**state, "offers": offers}, settings, ranker)
         if state.get("pending") != "job":
             return {"pending": "", "terminal": "", "just_bound_row": False}
         offered = list(state.get("jobs") or [])
@@ -405,6 +380,15 @@ def build_graph(
             }
         proposed = list(state.get("proposed_citations") or [])
         observed = list(state.get("observations") or [])
+        if state.get("draft_from_cache"):
+            return {
+                "gaps": [],
+                "gap_keys": [],
+                "same_gap": False,
+                "satisfactory": True,
+                "citations": _accepted_citations(proposed, observed),
+                "terminal": "",
+            }
         code_gaps = verify_answer(
             question=state.get("question") or "",
             question_type=plan_body.get("question_type") or "lookup",
@@ -432,6 +416,28 @@ def build_graph(
         }
 
     async def close(state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("draft_from_cache") and not state.get("cache_missing"):
+            steps = list(state.get("steps") or [])
+            steps.append({"kind": "verdict", "satisfactory": True, "gaps": []})
+            return {
+                "draft": state.get("draft") or "",
+                "gaps": [],
+                "satisfactory": True,
+                "steps": steps,
+                "terminal": "done",
+                "awaiting": "",
+            }
+        if state.get("cache_missing"):
+            steps = list(state.get("steps") or [])
+            steps.append({"kind": "verdict", "satisfactory": False, "gaps": []})
+            return {
+                "draft": state.get("draft") or "Подтверждённого числа в срезе нет.",
+                "gaps": [],
+                "satisfactory": False,
+                "steps": steps,
+                "terminal": "done",
+                "awaiting": "",
+            }
         gaps = [str(item) for item in (state.get("gaps") or [])]
         satisfactory = bool(state.get("satisfactory")) and not gaps
         draft = state.get("draft") or ""
@@ -474,7 +480,7 @@ def build_graph(
     builder.add_conditional_edges(
         "plan",
         _route_plan,
-        {"search": "search", "ask_user": "ask_user", "close": "close"},
+        {"search": "search", "ask_user": "ask_user", "close": "close", "load": "load"},
     )
     builder.add_conditional_edges(
         "search",
@@ -507,6 +513,10 @@ def build_graph(
     builder.add_edge("answer", "check")
 
     def route_check(state: dict[str, Any]) -> str:
+        if state.get("draft_from_cache") and not state.get("cache_missing"):
+            return "close"
+        if state.get("cache_missing"):
+            return "close"
         gaps = [str(item) for item in (state.get("gaps") or [])]
         if not gaps or gaps == ["schema"]:
             return "close"
@@ -532,6 +542,8 @@ def _route_plan(state: dict[str, Any]) -> str:
         return "close"
     if state.get("awaiting"):
         return "ask_user"
+    if state.get("just_bound_job"):
+        return "load"
     return "search"
 
 
@@ -608,6 +620,11 @@ def _agent_reply() -> dict[str, Any]:
         "awaiting": "",
         "search_again": False,
         "reload": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "user_question": "",
+        "pending": "",
+        "offers": [],
     }
 
 
@@ -665,6 +682,11 @@ def _books_done(jobs: list[dict[str, Any]]) -> dict[str, Any]:
         "awaiting": "",
         "search_again": False,
         "reload": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "user_question": "",
+        "pending": "",
+        "offers": [],
     }
 
 
@@ -714,19 +736,8 @@ async def _overview_of(parser: ParserClient, job_id: str) -> dict[str, Any]:
         "user_question": "",
         "pending": "",
         "label_reply": False,
-    }
-
-
-def _search_named(
-    state: dict[str, Any], text: str, job_id: str, mentions: list[str]
-) -> dict[str, Any]:
-    periods = periods_from_question(text, list(state.get("axes") or []))
-    scoped = {**state, "question": text, "human_reply": ""}
-    return _question_plan(scoped, mentions, periods) | {
-        "job_id": job_id,
-        "label_reply": False,
-        "terminal": "",
-        "awaiting": "",
+        "draft_from_cache": False,
+        "cache_missing": False,
     }
 
 
@@ -747,18 +758,28 @@ async def _named_file_turn(
     job: dict[str, Any],
     jobs: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """One real file is named. The inventory act is not legal."""
+    """One real file is named. A remaining label is resolved after the book loads."""
+    del model, jobs
     job_id = str(job.get("job_id") or "")
     filename = str(job.get("source_filename") or "")
-    mentions = remainder_needles(
-        text, [filename, job_id], list(state.get("axes") or [])
-    )
+    mentions = remainder_needles(text, [filename, job_id], list(state.get("axes") or []))
     if not mentions:
         return await _overview_of(parser, job_id)
-    acts = [name for name in await _about_acts(model, text, _filenames(jobs)) if name != "books"]
-    if "row" in acts:
-        return _search_named(state, text, job_id, mentions)
-    return await _overview_of(parser, job_id)
+    return {
+        "job_id": job_id,
+        "just_bound_job": True,
+        "question": text,
+        "human_reply": "",
+        "pending": "",
+        "awaiting": "",
+        "terminal": "",
+        "selected": [],
+        "period_ids": [],
+        "offers": [],
+        "user_question": "",
+        "draft_from_cache": False,
+        "cache_missing": False,
+    }
 
 
 async def _dialog_turn(
@@ -807,24 +828,6 @@ async def _book_or_agent(
     if found is None:
         return await _job_menu(parser)
     return found
-
-
-async def _divert_label_reply(
-    state: dict[str, Any], reply: str, model: JsonModel, parser: ParserClient
-) -> dict[str, Any] | None:
-    """A miss pause heard a new sentence. A label still searches; anything else leaves."""
-    found = await _dialog_turn(reply, state, model, parser, unbound_row="search")
-    if found is None:
-        return None
-    if found.get("awaiting"):
-        return found | {"question": reply, "human_reply": "", "label_reply": False}
-    return found | {
-        "question": reply,
-        "human_reply": "",
-        "user_question": "",
-        "pending": "",
-        "label_reply": False,
-    }
 
 
 async def _code_miss(
@@ -962,21 +965,192 @@ def _menu_again(state: dict[str, Any], offers: list[dict[str, Any]]) -> dict[str
     return _show_menu(text, offers)
 
 
+def _ranker_state(state: dict[str, Any], text: str) -> str:
+    summary = state.get("summary") or {}
+    filename = str(summary.get("source_filename") or "").strip()
+    if filename:
+        return f"Книга {filename}. {text}"
+    return text
+
+
+def _row_criterion(row: dict[str, Any]) -> str:
+    label = str(row.get("label") or "").strip()
+    sheet = str(row.get("sheet") or "").strip()
+    heading = _heading(row.get("label_path"), label)
+    text = f"{label}. Лист {sheet}." if sheet else f"{label}."
+    if heading:
+        text = f"{text} Раздел {heading}."
+    return text
+
+
+def _label_menu(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    offers = [compact_row(row) for row in rows]
+    labels = offered_labels(offers)
+    question = f"{MENU_INSTRUCTION}\n{labels}" if labels else MENU_INSTRUCTION
+    return _show_menu(question, offers)
+
+
+def _select_ready(
+    state: dict[str, Any],
+    rows: list[dict[str, Any]],
+    named: list[dict[str, str]],
+    settings: Settings,
+) -> dict[str, Any]:
+    labels = [str(row.get("label") or "") for row in rows]
+    planned = _question_plan(state, labels, named)
+    planned["plan"]["needles"] = []
+    planned["draft_from_cache"] = False
+    planned["cache_missing"] = False
+    planned["label_reply"] = False
+    chosen = _select({**state, **planned}, rows, settings)
+    if chosen.get("awaiting") or chosen.get("terminal"):
+        return chosen | {"draft_from_cache": False, "cache_missing": False}
+    return {**planned, **chosen}
+
+
+def _from_hits(
+    state: dict[str, Any],
+    hits: list[dict[str, Any]],
+    named: list[dict[str, str]],
+    settings: Settings,
+) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in hits:
+        label = str(row.get("label") or "").strip().casefold()
+        if label not in groups:
+            order.append(label)
+            groups[label] = []
+        groups[label].append(row)
+    ambiguous = [row for label in order if len(groups[label]) > 1 for row in groups[label]]
+    if ambiguous:
+        return _label_menu(ambiguous)
+    blocked = _label_cap(state, len(hits), settings)
+    if blocked:
+        return blocked
+    return _select_ready(state, hits, named, settings)
+
+
+async def _label_rows_for(
+    state: dict[str, Any],
+    parser: ParserClient,
+    cache: dict[tuple[str, str], list[dict[str, Any]]],
+) -> list[dict[str, Any]] | dict[str, Any]:
+    job_id = str(state.get("job_id") or "")
+    etag = str(state.get("book_etag") or "")
+    key = (job_id, etag)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        rows = await parser.list_rows(job_id)
+    except ParserError as exc:
+        return _terminal_or_raise(exc)
+    for old in [item for item in cache if item[0] == job_id and item != key]:
+        del cache[old]
+    cache[key] = rows
+    return rows
+
+
+async def _bind_named_file(
+    state: dict[str, Any],
+    text: str,
+    job: dict[str, Any],
+    axes: list[dict[str, Any]],
+    parser: ParserClient,
+) -> dict[str, Any] | None:
+    """Open another book, show its overview, or leave the label fork to run."""
+    job_id = str(job.get("job_id") or "")
+    filename = str(job.get("source_filename") or "")
+    if job_id and job_id != str(state.get("job_id") or ""):
+        return {
+            "job_id": job_id,
+            "just_bound_job": True,
+            "pending": "",
+            "awaiting": "",
+            "human_reply": "",
+            "user_question": "",
+            "offers": [],
+            "terminal": "",
+            "selected": [],
+            "period_ids": [],
+            "question": text,
+            "draft_from_cache": False,
+            "cache_missing": False,
+        }
+    mentions = remainder_needles(text, [filename, job_id], axes)
+    if not mentions:
+        return await _overview_of(parser, job_id or str(state.get("job_id") or ""))
+    return None
+
+
+async def _rank_labels(
+    state: dict[str, Any],
+    text: str,
+    index: list[dict[str, Any]],
+    ranker: Any,
+    parser: ParserClient,
+    settings: Settings,
+) -> dict[str, Any]:
+    if ranker is None:
+        raise ModelError("ranker")
+    short = shortlist_rows(text, index)
+    criteria: dict[str, str] = {}
+    by_key: dict[str, dict[str, Any]] = {}
+    for index_n, row in enumerate(short):
+        key = f"r{index_n}"
+        criteria[key] = _row_criterion(row)
+        by_key[key] = row
+    criteria["books"] = "Спросить, какие книги есть."
+    criteria["book"] = "Попросить обзор открытой книги."
+    criteria["intro"] = "Реплика про самого агента."
+    choice = await ranker.choose(_ranker_state(state, text), criteria)
+    decision = decide_margin(choice.probabilities, set(by_key), menu_open=False)
+    if decision.get("act") == "take":
+        key = str(decision.get("key") or "")
+        if key in by_key:
+            named = periods_from_question(text, list(state.get("axes") or []))
+            return _select_ready(state, [by_key[key]], named, settings)
+        if key == "books":
+            return await _books_answer(parser)
+        if key == "book":
+            return await _overview_of(parser, str(state.get("job_id") or ""))
+        if key == "intro":
+            return _agent_reply()
+        raise ModelError("ranker choice")
+    if decision.get("act") == "menu":
+        rows = [by_key[key] for key in decision.get("keys") or [] if key in by_key]
+        if rows:
+            return _label_menu(rows)
+    return _ask(state, _MISSING_ROW, settings=settings) | {
+        "label_reply": True,
+        "draft_from_cache": False,
+        "cache_missing": False,
+    }
+
+
 async def _choose_offer(
-    state: dict[str, Any], settings: Settings, model: JsonModel
+    state: dict[str, Any], settings: Settings, ranker: Any
 ) -> dict[str, Any]:
     offers = [row for row in (state.get("offers") or []) if isinstance(row, dict)]
     if _same_question(state):
         return _menu_again(state, offers)
     matched = matching_rows(str(state.get("human_reply") or ""), offers)
     if not matched:
-        picked = await _choose_by_model(state, offers, model)
+        picked = await _choose_by_ranker(state, offers, ranker)
         if picked is not None:
             matched = [picked]
     if len(matched) == 1:
         # The menu question is answered. The next pause, including a period, starts at zero.
         fresh = {**state, "clarify_rounds": 0}
-        chosen = _select(fresh, matched, settings)
+        named = periods_from_question(
+            str(state.get("human_reply") or ""), list(state.get("axes") or [])
+        )
+        if not named:
+            named = periods_from_question(
+                str(state.get("question") or ""), list(state.get("axes") or [])
+            )
+        chosen = _select_ready(fresh, matched, named, settings)
         if chosen.get("awaiting") or chosen.get("terminal"):
             return chosen | {
                 "just_bound_row": False,
@@ -1014,23 +1188,27 @@ def _unmatched_menu(
     }
 
 
-async def _choose_by_model(
-    state: dict[str, Any], offers: list[dict[str, Any]], model: JsonModel
+async def _choose_by_ranker(
+    state: dict[str, Any], offers: list[dict[str, Any]], ranker: Any
 ) -> dict[str, Any] | None:
+    """One choice over the printed rows. A weak score leaves the menu open."""
     if not offers:
         return None
-    numbers = [str(index) for index in range(1, len(offers) + 1)]
-    system, user = choose_messages(offers, str(state.get("human_reply") or ""))
-    try:
-        parsed = await model.complete_json(
-            role="choose", system=system, user=user, options=numbers
-        )
-    except SchemaError:
+    if ranker is None:
+        raise ModelError("ranker")
+    criteria = {
+        str(index): menu_criterion(index, row, offers)
+        for index, row in enumerate(offers, start=1)
+    }
+    reply = str(state.get("human_reply") or "")
+    choice = await ranker.choose(_ranker_state(state, reply), criteria)
+    decision = decide_margin(choice.probabilities, set(criteria), menu_open=True)
+    if decision.get("act") != "take":
         return None
-    option = str(parsed.get("option") or "").strip()
-    if option not in numbers:
-        return None
-    return offers[int(option) - 1]
+    key = str(decision.get("key") or "")
+    if key not in criteria:
+        raise ModelError("ranker choice")
+    return offers[int(key) - 1]
 
 
 def _periods_for_rows(
@@ -1254,7 +1432,7 @@ async def _catalog_pages(
     period_keys: set[str],
     limit: int,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Search a phrase once. A total miss with several tokens searches each token."""
+    """Search each phrase once. A miss stays an empty page."""
     fetched: dict[str, tuple[str, dict[str, Any]]] = {}
     pages: list[tuple[str, dict[str, Any]]] = []
     added: set[str] = set()
@@ -1280,16 +1458,7 @@ async def _catalog_pages(
         if not tokens:
             continue
         phrase = " ".join(tokens)
-        phrase_item = await fetch(phrase)
-        if int(phrase_item[1].get("total") or 0) > 0 or len(tokens) == 1:
-            add(phrase_item)
-            continue
-        token_pages = [await fetch(token) for token in tokens]
-        if any(int(page.get("total") or 0) > 0 for _token, page in token_pages):
-            for item in token_pages:
-                add(item)
-            continue
-        add(phrase_item)
+        add(await fetch(phrase))
     return pages
 
 

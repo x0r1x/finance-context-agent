@@ -20,8 +20,8 @@ from finance_context_agent.api.schemas import (
     history_has_assistant,
     last_user_text,
 )
-from finance_context_agent.llm import ModelError
-from finance_context_agent.parser import ParserError
+from finance_context_agent.clients.llm import ModelError
+from finance_context_agent.clients.parser import ParserError
 from finance_context_agent.session import (
     JobMismatchError,
     decide_input,

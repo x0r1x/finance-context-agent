@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from finance_context_agent.llm import (
+from finance_context_agent.clients.llm import (
     ModelError,
     OpenAIChat,
     Plan,
