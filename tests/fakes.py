@@ -298,9 +298,13 @@ class FakeRanker:
         self._queue: list[Any] = []
 
     def push(
-        self, key: str, probabilities: dict[str, float], sheets: float = 0.0
+        self,
+        key: str,
+        probabilities: dict[str, float],
+        sheets: float = 0.0,
+        hold: float = 0.0,
     ) -> FakeRanker:
-        self._queue.append((key, probabilities, sheets))
+        self._queue.append((key, probabilities, sheets, hold))
         return self
 
     def fail(self) -> FakeRanker:
@@ -308,18 +312,40 @@ class FakeRanker:
         return self
 
     async def choose(
-        self, state: str, criteria: dict[str, str], *, ask_act: bool = False
+        self,
+        state: str,
+        criteria: dict[str, str],
+        *,
+        ask_act: bool = False,
+        ask_hold: bool = False,
     ) -> Choice:
-        self.calls.append({"state": state, "criteria": dict(criteria), "ask_act": ask_act})
+        self.calls.append(
+            {
+                "state": state,
+                "criteria": dict(criteria),
+                "ask_act": ask_act,
+                "ask_hold": ask_hold,
+            }
+        )
         if not self._queue:
             probs = {name: 0.01 for name in criteria}
             first = next(iter(criteria), "intro")
-            return Choice(first, probs, sheets=0.0 if ask_act else None)
+            return Choice(
+                first,
+                probs,
+                sheets=0.0 if ask_act else None,
+                hold=0.0 if ask_hold else None,
+            )
         item = self._queue.pop(0)
         if item == "boom":
             raise ModelError("boom")
-        key, probabilities, sheets = item
-        return Choice(key, probabilities, sheets=sheets if ask_act else None)
+        key, probabilities, sheets, hold = item
+        return Choice(
+            key,
+            probabilities,
+            sheets=sheets if ask_act else None,
+            hold=hold if ask_hold else None,
+        )
 
 
 class ScriptedModel:

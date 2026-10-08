@@ -2459,6 +2459,99 @@ async def test_unbound_greeting_asks_which_book() -> None:
     assert parser.context_calls == []
 
 
+@pytest.mark.asyncio
+async def test_filename_after_a_greeting_is_the_introduction() -> None:
+    parser = FakeParser()
+    parser.jobs = [
+        {"job_id": "job-1", "source_filename": _PACKT},
+        {"job_id": "job-2", "source_filename": "rvi-project-finance.xlsx"},
+    ]
+    parser.summary = {"source_filename": _PACKT}
+    ranker = FakeRanker()
+    ranker.push("intro", {"intro": 0.444, "books": 0.412, "book": 0.135, "none": 0.009})
+    ranker.push(
+        "book",
+        {"book": 0.381, "intro": 0.329, "books": 0.282, "none": 0.008},
+        hold=0.933,
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await graph.ainvoke(new_turn_input("привет"), run_config("thread-hi"), durability="sync")
+    paused = await graph.aget_state(run_config("thread-hi"))
+    assert interrupts_of(paused)
+    assert "Какую книгу открыть?" in paused.values["user_question"]
+    assert ranker.calls[0]["ask_hold"] is False
+    await graph.ainvoke(Command(resume=_PACKT), run_config("thread-hi"), durability="sync")
+    snap = await graph.aget_state(run_config("thread-hi"))
+    assert not interrupts_of(snap)
+    assert snap.values["job_id"] == "job-1"
+    assert snap.values["draft"] == chitchat_reply()
+    assert snap.values["satisfactory"] is True
+    assert snap.values["citations"] == []
+    assert "Такой строки нет" not in snap.values["draft"]
+    assert _PACKT not in snap.values["draft"]
+    assert "Какую книгу открыть?" not in snap.values["draft"]
+    assert parser.observation_calls == []
+    assert parser.context_calls == []
+    assert len(ranker.calls) == 2
+    assert ranker.calls[1]["ask_hold"] is True
+    assert "hold" not in ranker.calls[1]["criteria"]
+    assert ranker.calls[1]["state"] == f"Книга {_PACKT}. привет"
+
+
+@pytest.mark.asyncio
+async def test_filename_after_a_missing_metric_stays_a_miss() -> None:
+    parser = FakeParser()
+    parser.jobs = [{"job_id": "job-1", "source_filename": _PACKT}]
+    parser.summary = {"source_filename": _PACKT}
+    ranker = FakeRanker()
+    ranker.push("books", {"books": 0.398, "intro": 0.296, "book": 0.234, "none": 0.072})
+    ranker.push(
+        "book",
+        {"book": 0.52, "books": 0.26, "intro": 0.13, "none": 0.09},
+        hold=0.266,
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await graph.ainvoke(
+        new_turn_input("Какой DSCR?"), run_config("thread-dscr"), durability="sync"
+    )
+    paused = await graph.aget_state(run_config("thread-dscr"))
+    assert interrupts_of(paused)
+    assert "Какую книгу открыть?" in paused.values["user_question"]
+    await graph.ainvoke(Command(resume=_PACKT), run_config("thread-dscr"), durability="sync")
+    snap = await graph.aget_state(run_config("thread-dscr"))
+    assert interrupts_of(snap)
+    assert "Такой строки нет" in snap.values["user_question"]
+    assert parser.context_calls == []
+    assert snap.values["job_id"] == "job-1"
+    assert ranker.calls[1]["ask_hold"] is True
+
+
+@pytest.mark.asyncio
+async def test_greeting_inside_an_open_book_survives_a_miss() -> None:
+    parser = FakeParser()
+    parser.jobs = [{"job_id": "job-1", "source_filename": _PACKT}]
+    parser.summary = {"source_filename": _PACKT}
+    ranker = FakeRanker()
+    ranker.push(
+        "book",
+        {"book": 0.381, "intro": 0.329, "books": 0.282, "none": 0.008},
+        hold=0.846,
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await graph.ainvoke(
+        new_turn_input("Привет", "job-1"),
+        run_config("thread-open-hi"),
+        durability="sync",
+    )
+    snap = await graph.aget_state(run_config("thread-open-hi"))
+    assert not interrupts_of(snap)
+    assert snap.values["draft"] == chitchat_reply()
+    assert _PACKT not in snap.values["draft"]
+    assert snap.values["job_id"] == "job-1"
+    assert ranker.calls[0]["ask_hold"] is True
+    assert parser.context_calls == []
+
+
 def _capex_catalog() -> list[dict]:
     return [
         catalog_row("exact", "CAPEX (including SPV costs)", sheet="Input Assumptions"),

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from finance_context_agent.clients.llm import ModelError
-from finance_context_agent.questions import LIST_FLOOR
+from finance_context_agent.questions import HOLD_FLOOR, LIST_FLOOR, decide_margin
 from finance_context_agent.settings import field_default
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,9 @@ _INSTRUCTIONS = "Какой один пункт просит реплика?"
 _ACT_INSTRUCTIONS = "Что просит реплика?"
 _ACT_VALUES = "Одно число или ряд по периодам."
 _ACT_SHEETS = "Какие есть строки и на каких они листах."
+_HOLD_INSTRUCTIONS = "Что сделать с ответом?"
+_HOLD_CELL = "Найти число или ряд одной строки."
+_HOLD_HOLD = "Книга выбрана. Число не спрашивали."
 
 
 class Choice:
@@ -25,10 +28,12 @@ class Choice:
         key: str,
         probabilities: dict[str, float],
         sheets: float | None = None,
+        hold: float | None = None,
     ) -> None:
         self.key = key
         self.probabilities = probabilities
         self.sheets = sheets
+        self.hold = hold
 
 
 class RankerClient:
@@ -53,7 +58,7 @@ class RankerClient:
             await self._client.aclose()
 
     async def choose(
-        self, state: str, criteria: dict[str, str], *, ask_act: bool = False
+        self, state: str, criteria: dict[str, str], *, ask_act: bool = False, ask_hold: bool = False
     ) -> Choice:
         questions: dict[str, Any] = {
             "pick": {
@@ -67,6 +72,12 @@ class RankerClient:
                 "type": "choice",
                 "instructions": _ACT_INSTRUCTIONS,
                 "criteria": {"values": _ACT_VALUES, "sheets": _ACT_SHEETS},
+            }
+        if ask_hold:
+            questions["hold"] = {
+                "type": "choice",
+                "instructions": _HOLD_INSTRUCTIONS,
+                "criteria": {"cell": _HOLD_CELL, "hold": _HOLD_HOLD},
             }
         payload = {"model": self._model, "state": state, "questions": questions}
         try:
@@ -83,11 +94,23 @@ class RankerClient:
         choice = _choice(body, criteria)
         if ask_act:
             choice.sheets = _sheets(body)
+        if ask_hold:
+            choice.hold = _hold(body)
         logged = choice.key
         if ask_act and choice.sheets is not None and choice.sheets >= LIST_FLOOR:
             logged = "sheets"
+        elif _prints_hold(ask_hold, choice):
+            logged = "hold"
         logger.info("ranker post %s %s", self._url, logged)
         return choice
+
+
+def _prints_hold(ask_hold: bool, choice: Choice) -> bool:
+    """The introduction is printed only when the row choice itself missed."""
+    if not ask_hold or choice.hold is None or choice.hold < HOLD_FLOOR:
+        return False
+    decision = decide_margin(choice.probabilities, set(), menu_open=False)
+    return decision.get("act") == "miss"
 
 
 def _choice(body: Any, criteria: dict[str, str]) -> Choice:
@@ -128,10 +151,21 @@ def _sheets(body: Any) -> float:
     act = _scored(body).get("act")
     if not isinstance(act, dict):
         raise ModelError("ranker schema")
-    raw = act.get("probabilities")
+    return _named_score(act, "sheets")
+
+
+def _hold(body: Any) -> float:
+    hold = _scored(body).get("hold")
+    if not isinstance(hold, dict):
+        raise ModelError("ranker schema")
+    return _named_score(hold, "hold")
+
+
+def _named_score(question: dict[str, Any], name: str) -> float:
+    raw = question.get("probabilities")
     if not isinstance(raw, dict):
         raise ModelError("ranker schema")
-    score = raw.get("sheets")
+    score = raw.get(name)
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         raise ModelError("ranker schema")
     return float(score)

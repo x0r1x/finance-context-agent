@@ -98,6 +98,9 @@ MENU_CAP = 8
 # Measured 2026-10-08: a bare label scores sheets 0.709, "есть ли еще CAPEX" scores 0.771.
 LIST_FLOOR = 0.75
 INVENTORY_CAP = 24
+# Measured 2026-10-09: "Привет" inside an open book scores hold 0.846.
+# "Спасибо" scores 0.689. "Какой DSCR?" scores cell 0.734.
+HOLD_FLOOR = 0.80
 
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 

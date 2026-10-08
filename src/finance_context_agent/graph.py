@@ -28,6 +28,7 @@ from finance_context_agent.prompts import (
     without_account_code,
 )
 from finance_context_agent.questions import (
+    HOLD_FLOOR,
     LIST_FLOOR,
     asks_how,
     book_overview,
@@ -1205,7 +1206,10 @@ async def _rank_labels(
     criteria, by_key = _choice_criteria(pool, state)
     filename = str((state.get("summary") or {}).get("source_filename") or "")
     choice = await ranker.choose(
-        ranker_state(filename, text, bool(pool)), criteria, ask_act=bool(pool)
+        ranker_state(filename, text, bool(pool)),
+        criteria,
+        ask_act=bool(pool),
+        ask_hold=not pool and bool(filename.strip()),
     )
     if pool and choice.sheets is not None and choice.sheets >= LIST_FLOOR:
         return _sheet_list(state, text, catalog_rows, filenames, settings)
@@ -1230,6 +1234,8 @@ async def _rank_labels(
         rows = [by_key[key] for key in decision.get("keys") or [] if key in by_key]
         if rows:
             return _label_menu(rows)
+    if decision.get("act") == "miss" and choice.hold is not None and choice.hold >= HOLD_FLOOR:
+        return _agent_reply()
     return _ask(state, _MISSING_ROW, settings=settings) | {
         "label_reply": True,
         "draft_from_cache": False,
