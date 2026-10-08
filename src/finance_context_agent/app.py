@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -79,6 +80,13 @@ app = create_app()
 
 def main() -> None:
     settings = Settings()
+    ranker_log = logging.getLogger("finance_context_agent.clients.ranker")
+    ranker_log.setLevel(logging.INFO)
+    if not ranker_log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        ranker_log.addHandler(handler)
+    ranker_log.propagate = False
     uvicorn.run(
         "finance_context_agent.app:app",
         host=settings.host,

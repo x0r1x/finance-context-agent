@@ -10,10 +10,8 @@ from langgraph.types import interrupt
 
 from finance_context_agent.catalog import (
     MENU_INSTRUCTION,
-    _heading,
     compact_row,
     matching_rows,
-    menu_criterion,
     narrow_page,
     offered_labels,
     render_menu,
@@ -33,15 +31,11 @@ from finance_context_agent.questions import (
     book_overview,
     books_reply,
     chitchat_reply,
-    contained_labels,
-    cover_question,
+    choice_rows,
     decide_margin,
     file_segments,
-    is_cover,
     name_tokens,
-    remainder_needles,
-    same_line,
-    shortlist_rows,
+    ranker_state,
 )
 from finance_context_agent.settings import Settings
 
@@ -49,6 +43,10 @@ _TOKEN_EDGE = "?.!,;:«»\"'[]"
 _MISSING_ROW = "Такой строки нет. Назовите подпись иначе или выберите другую метрику."
 _MENU_LEAD = "Какую строку взять?"
 _MENU_NEEDLE = re.compile(r"«([^»]+)»\s*:")
+_ASK_BOOKS = "Спросить, какие книги есть."
+_ASK_BOOK = "Попросить обзор открытой книги."
+_ASK_INTRO = "Реплика про самого агента."
+_ASK_NONE = "Подходящей строки нет."
 
 
 class AgentState(TypedDict, total=False):
@@ -136,14 +134,11 @@ def build_graph(
         if state.get("content_steps", 0) >= settings.content_budget:
             return _done(state.get("draft") or "", list(state.get("gaps") or ["budget"]))
         if not state.get("job_id"):
-            return await _book_or_agent(state, model, parser)
+            return await _book_or_agent(state, model, parser, ranker)
         question = str(state.get("question") or "")
         axes = list(state.get("axes") or [])
         reply = str(state.get("human_reply") or "").strip()
         text = reply or question
-        named = periods_from_question(text, axes)
-        if reply and not named:
-            named = periods_from_question(question, axes)
         if ".xlsx" in text.casefold() or ".xlsm" in text.casefold():
             loaded = await _succeeded_jobs(parser)
             if isinstance(loaded, dict):
@@ -158,23 +153,10 @@ def build_graph(
         found = await _label_rows_for(state, parser, label_rows)
         if isinstance(found, dict):
             return found
-        hits = contained_labels(text, found)
-        if hits:
-            line = same_line(hits, found)
-            hit_keys = {str(row.get("row_key")) for row in hits}
-            if {str(row.get("row_key")) for row in line} != hit_keys:
-                return _label_menu(line)
-            return _from_hits(state, hits, named, settings)
-        if not reply and is_cover(question):
-            return _ask(state, cover_question(state.get("summary") or {}), settings=settings) | {
-                "label_reply": True,
-                "draft_from_cache": False,
-                "cache_missing": False,
-            }
-        held = list(state.get("selected") or [])
-        if held and (named or asks_how(text)):
-            return _continue_selected(state, held, named, text, settings)
-        return await _rank_labels(state, text, found, ranker, parser, settings)
+        filename = str((state.get("summary") or {}).get("source_filename") or "").strip()
+        filenames = [filename] if filename else []
+        pool = choice_rows(text, found, filenames)
+        return await _rank_labels(state, text, pool, ranker, parser, settings)
 
     async def search(state: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
@@ -215,7 +197,7 @@ def build_graph(
             return _terminal_or_raise(exc)
         pages = [narrow_page(needle, page) for needle, page in pages]
         if plan_body.get("source") == "question" and _pages_empty(pages):
-            return await _code_miss(state, model, settings, parser)
+            return await _code_miss(state, model, settings, parser, ranker)
         if not pages:
             return _miss(state, "Пустой поиск.", settings)
         if (plan_body.get("question_type") or "lookup") == "compose":
@@ -232,7 +214,7 @@ def build_graph(
                 except ParserError as exc:
                     return _terminal_or_raise(exc)
             if offers:
-                return await _choose_offer({**state, "offers": offers}, settings, ranker)
+                return await _choose_offer({**state, "offers": offers}, settings)
         if state.get("pending") != "job":
             return {"pending": "", "terminal": "", "just_bound_row": False}
         offered = list(state.get("jobs") or [])
@@ -630,6 +612,8 @@ def _agent_reply() -> dict[str, Any]:
         "user_question": "",
         "pending": "",
         "offers": [],
+        "selected": [],
+        "period_ids": [],
     }
 
 
@@ -692,6 +676,8 @@ def _books_done(jobs: list[dict[str, Any]]) -> dict[str, Any]:
         "user_question": "",
         "pending": "",
         "offers": [],
+        "selected": [],
+        "period_ids": [],
     }
 
 
@@ -763,13 +749,9 @@ async def _named_file_turn(
     job: dict[str, Any],
     jobs: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """One real file is named. A remaining label is resolved after the book loads."""
-    del model, jobs
+    """One real file is named. The choice runs after the book loads."""
+    del state, model, parser, jobs
     job_id = str(job.get("job_id") or "")
-    filename = str(job.get("source_filename") or "")
-    mentions = remainder_needles(text, [filename, job_id], list(state.get("axes") or []))
-    if not mentions:
-        return await _overview_of(parser, job_id)
     return {
         "job_id": job_id,
         "just_bound_job": True,
@@ -823,30 +805,75 @@ async def _dialog_turn(
 
 
 async def _book_or_agent(
-    state: dict[str, Any], model: JsonModel, parser: ParserClient
+    state: dict[str, Any], model: JsonModel, parser: ParserClient, ranker: Any
 ) -> dict[str, Any]:
-    """No book is bound. A named file opens that book; a row asks which file."""
+    """No book is bound. One filename loads that book. Otherwise one dialog choice."""
     question = str(state.get("question") or "")
-    if is_cover(question):
-        return await _job_menu(parser)
-    found = await _dialog_turn(question, state, model, parser, unbound_row="menu")
-    if found is None:
-        return await _job_menu(parser)
-    return found
+    jobs = await _succeeded_jobs(parser)
+    if isinstance(jobs, dict):
+        return jobs
+    named = _named_jobs(question, jobs)
+    if len(named) > 1:
+        return _job_pause(jobs)
+    if len(named) == 1:
+        return await _named_file_turn(question, state, model, parser, named[0], jobs)
+    return await _dialog_choice(question, jobs, ranker)
+
+
+async def _dialog_choice(
+    text: str, jobs: list[dict[str, Any]], ranker: Any
+) -> dict[str, Any]:
+    """books, book, intro, or none. No catalog row is in this choice."""
+    if ranker is None:
+        raise ModelError("ranker")
+    criteria = {
+        "books": _ASK_BOOKS,
+        "book": _ASK_BOOK,
+        "intro": _ASK_INTRO,
+        "none": _ASK_NONE,
+    }
+    choice = await ranker.choose(text, criteria)
+    decision = decide_margin(choice.probabilities, set(), menu_open=False)
+    if decision.get("act") == "take":
+        key = str(decision.get("key") or "")
+        if key == "books":
+            return _books_done(jobs)
+        if key == "intro":
+            return _agent_reply()
+        if key not in {"book", "none"}:
+            raise ModelError("ranker choice")
+    return _job_pause(jobs)
 
 
 async def _code_miss(
-    state: dict[str, Any], model: JsonModel, settings: Settings, parser: Any
+    state: dict[str, Any], model: JsonModel, settings: Settings, parser: Any, ranker: Any
 ) -> dict[str, Any]:
-    """A code plan grounded nothing. A named file is not listed again."""
-    question = str(state.get("question") or "")
-    found = await _dialog_turn(question, state, model, parser, unbound_row="search")
-    if found is None or (isinstance(found, dict) and _is_search_plan(found)):
-        pause = _ask(state, _MISSING_ROW, settings=settings) | {"label_reply": True}
-        if isinstance(found, dict) and found.get("job_id"):
-            pause["job_id"] = found["job_id"]
-        return pause
-    return found
+    """A code plan grounded nothing. A weak score does not open a book."""
+    del model
+    text = str(state.get("human_reply") or "").strip() or str(state.get("question") or "")
+    if ranker is None:
+        raise ModelError("ranker")
+    criteria = {
+        "books": _ASK_BOOKS,
+        "book": _ASK_BOOK,
+        "intro": _ASK_INTRO,
+        "none": _ASK_NONE,
+    }
+    choice = await ranker.choose(text, criteria)
+    decision = decide_margin(choice.probabilities, set(), menu_open=False)
+    if decision.get("act") == "take":
+        key = str(decision.get("key") or "")
+        if key == "books":
+            return await _books_answer(parser)
+        if key == "intro":
+            return _agent_reply()
+        if key not in {"book", "none"}:
+            raise ModelError("ranker choice")
+    return _ask(state, _MISSING_ROW, settings=settings) | {
+        "label_reply": True,
+        "draft_from_cache": False,
+        "cache_missing": False,
+    }
 
 
 def _miss(state: dict[str, Any], note: str, settings: Settings) -> dict[str, Any]:
@@ -891,9 +918,6 @@ def _compose(
     if pending:
         return _menu(pending)
     return _select(state, _distinct_rows(pages), settings)
-
-
-_UNMATCHED_ROW = "Не нашёл такую строку. Назовите подпись из списка ещё раз."
 
 
 def _menu(pages: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -968,24 +992,6 @@ def _menu_again(state: dict[str, Any], offers: list[dict[str, Any]]) -> dict[str
     else:
         text = f"{MENU_INSTRUCTION}\n{offered_labels(offers)}"
     return _show_menu(text, offers)
-
-
-def _ranker_state(state: dict[str, Any], text: str) -> str:
-    summary = state.get("summary") or {}
-    filename = str(summary.get("source_filename") or "").strip()
-    if filename:
-        return f"Книга {filename}. {text}"
-    return text
-
-
-def _row_criterion(row: dict[str, Any]) -> str:
-    label = str(row.get("label") or "").strip()
-    sheet = str(row.get("sheet") or "").strip()
-    heading = _heading(row.get("label_path"), label)
-    text = f"{label}. Лист {sheet}." if sheet else f"{label}."
-    if heading:
-        text = f"{text} Раздел {heading}."
-    return text
 
 
 def _label_menu(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1064,9 +1070,9 @@ async def _bind_named_file(
     axes: list[dict[str, Any]],
     parser: ParserClient,
 ) -> dict[str, Any] | None:
-    """Open another book, show its overview, or leave the label fork to run."""
+    """Switch to another book. The open book stays, and the choice runs next."""
+    del axes, parser
     job_id = str(job.get("job_id") or "")
-    filename = str(job.get("source_filename") or "")
     if job_id and job_id != str(state.get("job_id") or ""):
         return {
             "job_id": job_id,
@@ -1083,41 +1089,67 @@ async def _bind_named_file(
             "draft_from_cache": False,
             "cache_missing": False,
         }
-    mentions = remainder_needles(text, [filename, job_id], axes)
-    if not mentions:
-        return await _overview_of(parser, job_id or str(state.get("job_id") or ""))
     return None
+
+
+def _choice_criteria(
+    pool: list[dict[str, Any]], state: dict[str, Any]
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """One criterion per pooled row, then the dialog actions. Sheet only on a tie."""
+    shared: dict[str, int] = {}
+    for row in pool:
+        label = str(row.get("label") or "").strip().casefold()
+        shared[label] = shared.get(label, 0) + 1
+    criteria: dict[str, str] = {}
+    by_key: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(pool):
+        key = f"r{index}"
+        label = str(row.get("label") or "").strip()
+        text = label
+        if shared.get(label.casefold(), 0) > 1:
+            sheet = str(row.get("sheet") or "").strip()
+            text = f"{label} Лист {sheet}."
+        criteria[key] = text
+        by_key[key] = row
+    if pool:
+        return criteria, by_key
+    criteria["books"] = _ASK_BOOKS
+    criteria["book"] = _ASK_BOOK
+    criteria["intro"] = _ASK_INTRO
+    criteria["none"] = _ASK_NONE
+    held = [row for row in (state.get("selected") or []) if isinstance(row, dict)]
+    if held:
+        criteria["open"] = f"Открытая строка: {str(held[0].get('label') or '').strip()}"
+    return criteria, by_key
+
+
+def _named_periods(state: dict[str, Any], text: str) -> list[dict[str, str]]:
+    axes = list(state.get("axes") or [])
+    named = periods_from_question(text, axes)
+    if str(state.get("human_reply") or "").strip() and not named:
+        named = periods_from_question(str(state.get("question") or ""), axes)
+    return named
 
 
 async def _rank_labels(
     state: dict[str, Any],
     text: str,
-    index: list[dict[str, Any]],
+    pool: list[dict[str, Any]],
     ranker: Any,
     parser: ParserClient,
     settings: Settings,
 ) -> dict[str, Any]:
+    """One choice. The returned key is the row, the overview, or the pause."""
     if ranker is None:
         raise ModelError("ranker")
-    short = shortlist_rows(text, index)
-    criteria: dict[str, str] = {}
-    by_key: dict[str, dict[str, Any]] = {}
-    for index_n, row in enumerate(short):
-        key = f"r{index_n}"
-        criteria[key] = _row_criterion(row)
-        by_key[key] = row
-    criteria["books"] = "Спросить, какие книги есть."
-    criteria["book"] = "Попросить обзор открытой книги."
-    criteria["intro"] = "Реплика про самого агента."
-    # No catalog row: without this line the three dialog actions are the whole choice.
-    if not short:
-        criteria["none"] = "Подходящей строки нет."
-    choice = await ranker.choose(_ranker_state(state, text), criteria)
+    criteria, by_key = _choice_criteria(pool, state)
+    filename = str((state.get("summary") or {}).get("source_filename") or "")
+    choice = await ranker.choose(ranker_state(filename, text, bool(pool)), criteria)
     decision = decide_margin(choice.probabilities, set(by_key), menu_open=False)
     if decision.get("act") == "take":
         key = str(decision.get("key") or "")
+        named = _named_periods(state, text)
         if key in by_key:
-            named = periods_from_question(text, list(state.get("axes") or []))
             return _select_ready(state, [by_key[key]], named, settings)
         if key == "books":
             return await _books_answer(parser)
@@ -1125,6 +1157,9 @@ async def _rank_labels(
             return await _overview_of(parser, str(state.get("job_id") or ""))
         if key == "intro":
             return _agent_reply()
+        if key == "open":
+            held = [row for row in (state.get("selected") or []) if isinstance(row, dict)]
+            return _continue_selected(state, held, named, text, settings)
         if key != "none":
             raise ModelError("ranker choice")
     if decision.get("act") == "menu":
@@ -1138,17 +1173,11 @@ async def _rank_labels(
     }
 
 
-async def _choose_offer(
-    state: dict[str, Any], settings: Settings, ranker: Any
-) -> dict[str, Any]:
+async def _choose_offer(state: dict[str, Any], settings: Settings) -> dict[str, Any]:
     offers = [row for row in (state.get("offers") or []) if isinstance(row, dict)]
     if _same_question(state):
         return _menu_again(state, offers)
     matched = matching_rows(str(state.get("human_reply") or ""), offers)
-    if not matched:
-        picked = await _choose_by_ranker(state, offers, ranker)
-        if picked is not None:
-            matched = [picked]
     if len(matched) == 1:
         # The menu question is answered. The next pause, including a period, starts at zero.
         fresh = {**state, "clarify_rounds": 0}
@@ -1179,45 +1208,16 @@ async def _choose_offer(
     if len(matched) > 1:
         question = f"{MENU_INSTRUCTION}\n{offered_labels(matched)}"
         return _show_menu(question, [compact_row(row) for row in matched])
-    return _unmatched_menu(state, offers, settings)
-
-
-def _unmatched_menu(
-    state: dict[str, Any], offers: list[dict[str, Any]], settings: Settings
-) -> dict[str, Any]:
-    """A menu miss keeps the reply count. Two misses still close the turn."""
-    question = _UNMATCHED_ROW
-    labels = offered_labels(offers)
-    if labels:
-        question = f"{_UNMATCHED_ROW}\n{labels}"
-    return _ask(state, question, settings=settings) | {
-        "offers": offers,
-        "menu_question": state.get("menu_question") or "",
+    return {
+        "offers": [],
+        "pending": "",
+        "awaiting": "",
+        "user_question": "",
+        "menu_question": "",
         "just_bound_row": False,
+        "just_bound_job": False,
+        "terminal": "",
     }
-
-
-async def _choose_by_ranker(
-    state: dict[str, Any], offers: list[dict[str, Any]], ranker: Any
-) -> dict[str, Any] | None:
-    """One choice over the printed rows. A weak score leaves the menu open."""
-    if not offers:
-        return None
-    if ranker is None:
-        raise ModelError("ranker")
-    criteria = {
-        str(index): menu_criterion(index, row, offers)
-        for index, row in enumerate(offers, start=1)
-    }
-    reply = str(state.get("human_reply") or "")
-    choice = await ranker.choose(_ranker_state(state, reply), criteria)
-    decision = decide_margin(choice.probabilities, set(criteria), menu_open=True)
-    if decision.get("act") != "take":
-        return None
-    key = str(decision.get("key") or "")
-    if key not in criteria:
-        raise ModelError("ranker choice")
-    return offers[int(key) - 1]
 
 
 def _periods_for_rows(

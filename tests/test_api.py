@@ -18,12 +18,9 @@ from tests.fakes import (
     FakeParser,
     FakeRanker,
     ScriptedModel,
-    answer,
     catalog_row,
-    cite,
     observation,
     page,
-    plan,
     year_axes,
 )
 
@@ -120,6 +117,7 @@ async def test_missing_thread_id_is_minted() -> None:
     model = ScriptedModel()
     ranker = FakeRanker()
     question = "Какой DSCR в 2030?"
+    ranker.push("r0", {"r0": 0.9, "books": 0.02, "book": 0.02, "intro": 0.02})
     app, _graph = _app(parser, model, ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
@@ -138,7 +136,7 @@ async def test_missing_thread_id_is_minted() -> None:
                 "user": "alice",
             },
         )
-        model.push("about", {"acts": ["chitchat"]})
+        ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02, "none": 0.01})
         hello = "привет"
         opened_hello = await client.post(
             "/v1/chat/completions",
@@ -194,9 +192,8 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
     parser.jobs = [{"job_id": JOB, "source_filename": "model.xlsx"}]
     _ready(parser)
     model = ScriptedModel()
-    model.push("about", {"acts": ["row"]})
-    model.push("about", {"acts": ["row"]})
-    app, graph = _app(parser, model)
+    ranker = FakeRanker()
+    app, graph = _app(parser, model, ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         asked = await client.post(
             "/v1/chat/completions",
@@ -207,10 +204,7 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
         assert "model.xlsx" in asked.json()["choices"][0]["message"]["content"]
         assert parser.observation_calls == []
 
-        model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-        model.push(
-            "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-        )
+        ranker.push("r0", {"r0": 0.9, "books": 0.02, "book": 0.02, "intro": 0.02})
         chosen = await client.post(
             "/v1/chat/completions",
             json=_payload("model.xlsx", job_id=JOB),
@@ -233,11 +227,7 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
             json={"messages": [{"role": "user", "content": "Какой DSCR?"}]},
         )
         assert len(model.seen) == seen
-        model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-        model.push(
-            "answer",
-            answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")]),
-        )
+        ranker.push("r0", {"r0": 0.9, "books": 0.02, "book": 0.02, "intro": 0.02})
         followed = await client.post(
             "/v1/chat/completions",
             json={
@@ -358,11 +348,9 @@ async def test_job_and_thread_headers_are_accepted() -> None:
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
-    model.push("plan", plan(["DSCR"], [{"year": "2030"}]))
-    model.push(
-        "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
-    )
-    app, _graph = _app(parser, model)
+    ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.9, "books": 0.02, "book": 0.02, "intro": 0.02})
+    app, _graph = _app(parser, model, ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
             "/v1/chat/completions",

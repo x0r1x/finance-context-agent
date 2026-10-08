@@ -115,7 +115,9 @@ async def test_live_redis_pauses_and_the_lock_is_owned(redis_url: str) -> None:
 
     async with AsyncRedisSaver.from_conn_string(redis_url, ttl=ttl) as saver:
         await saver.asetup()
-        graph = build_graph(parser, model, saver, ranker=FakeRanker())
+        ranker = FakeRanker()
+        ranker.push("r0", {"r0": 0.9, "r1": 0.04, "books": 0.02, "book": 0.02, "intro": 0.01})
+        graph = build_graph(parser, model, saver, ranker=ranker)
         await graph.ainvoke(Command(resume="DSCR наблюдённый"), config, durability="sync")
         done = await graph.aget_state(config)
     assert done.values["satisfactory"] is True

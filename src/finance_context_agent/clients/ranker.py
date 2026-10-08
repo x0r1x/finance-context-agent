@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from finance_context_agent.clients.llm import ModelError
 from finance_context_agent.settings import field_default
+
+logger = logging.getLogger(__name__)
 
 _INSTRUCTIONS = "Какой один пункт просит реплика?"
 
@@ -61,7 +64,9 @@ class RankerClient:
                 status=response.status_code,
                 body=response.text[:300],
             )
-        return _choice(response.json(), criteria)
+        choice = _choice(response.json(), criteria)
+        logger.info("ranker post %s %s", self._url, choice.key)
+        return choice
 
 
 def _choice(body: Any, criteria: dict[str, str]) -> Choice:

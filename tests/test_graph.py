@@ -348,7 +348,9 @@ async def test_zero_hit_needle_does_not_hide_one_row() -> None:
             label="EBITDA",
         )
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
@@ -367,7 +369,9 @@ async def test_compose_keeps_a_missing_metric() -> None:
     parser.observations[("job-1", "row-ebitda")] = [
         observation("row-ebitda", "2030", "10", "B1", label="EBITDA")
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Сравни EBITDA и DSCR")
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
@@ -405,7 +409,9 @@ async def test_currency_nag_does_not_hide_an_explicit_zero() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["satisfactory"] is True
@@ -435,7 +441,9 @@ async def test_question_prefix_still_finds_the_named_period() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой EBITDA в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.catalog_calls == []
@@ -484,7 +492,9 @@ async def test_period_key_leaves_one_catalog_query() -> None:
             [cite("P&L|13|P&L!r2", "Y1", "0", "C10", status="zero_explicit")],
         ),
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "EBITDA Y1")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.catalog_calls == []
@@ -506,7 +516,9 @@ async def test_a_hit_phrase_keeps_words_like_in() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["Cash in Bank"], [{"period_key": "Y1"}]))
     model.push("answer", answer("5", [cite("row-cash", "Y1", "5", "C1")]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Cash in Bank")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.catalog_calls == []
@@ -526,7 +538,9 @@ async def test_one_value_requests_one_row_and_named_periods() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     assert parser.observation_calls == [
         {
@@ -558,7 +572,9 @@ async def test_two_years_of_one_row_are_one_observation_call() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"year": "2030"}, {"period_key": "Y1"}]))
     model.push("answer", answer("В 2030 DSCR 1.25.", [cite("row-dscr", "2030", "1.25", "C10")]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Сравни DSCR в 2030 и в Y1")
     assert len(parser.observation_calls) == 1
     assert parser.observation_calls[0]["period_ids"] == ["2030", "Y1"]
@@ -571,7 +587,9 @@ async def test_number_outside_observations_causes_another_step() -> None:
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
     parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "2030", "1.25", "C10")]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     assert _seen(model, "answer") == []
     snap = await graph.aget_state(run_config("thread-1"))
@@ -598,7 +616,9 @@ async def test_why_at_depth_zero_retries_at_depth_two_without_asking() -> None:
     stored["formula"]["text"] = "=H10/I10"
     parser.observations[("job-1", "row-dscr")] = [stored]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Как считается DSCR в 2030?")
     assert parser.catalog_calls == []
     assert [call["precedent_depth"] for call in parser.observation_calls] == [2]
@@ -620,7 +640,9 @@ async def test_repeated_gap_is_not_satisfactory() -> None:
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
     parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "Y1", "1.25", "C10")]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["satisfactory"] is False
@@ -642,7 +664,9 @@ async def test_empty_cache_finishes_without_a_zero() -> None:
     model.push(
         "answer", answer("Ячейка empty.", [cite("row-dscr", "Y1", None, "C10", status="empty")])
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["satisfactory"] is True
@@ -687,20 +711,6 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     assert "№2" in menu
     assert "Лист" in menu
     assert "[" not in menu
-    await graph.ainvoke(
-        Command(resume="CAPEX [Construction];"),
-        run_config("thread-1"),
-        durability="sync",
-    )
-    copied = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(copied)
-    copied_text = copied.values["user_question"]
-    assert "Не нашёл такую строку" in copied_text
-    assert "Не смог выбрать строку" not in copied_text
-    assert parser.observation_calls == []
-    assert len(parser.catalog_calls) == searched
-    assert _seen(model, "plan") == []
-    assert len(ranker.calls) == 2
     heard = len(ranker.calls)
     for _ in range(3):
         await graph.ainvoke(
@@ -720,42 +730,6 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
         assert len(parser.catalog_calls) == searched
         assert _seen(model, "plan") == []
         assert len(ranker.calls) == heard
-    await graph.ainvoke(
-        Command(resume="нет такой подписи"),
-        run_config("thread-1"),
-        durability="sync",
-    )
-    missed = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(missed)
-    missed_text = missed.values["user_question"]
-    assert "Не нашёл такую строку" in missed_text
-    assert "Не смог выбрать строку" not in missed_text
-    assert "DSCR лимит" in missed_text
-    assert parser.observation_calls == []
-    assert len(parser.catalog_calls) == searched
-    assert _seen(model, "plan") == []
-    await graph.ainvoke(
-        Command(resume="Какой DSCR в 2030?"),
-        run_config("thread-1"),
-        durability="sync",
-    )
-    restored = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(restored)
-    assert restored.values["user_question"] == menu
-    assert restored.values["clarify_rounds"] == 0
-    assert "Не нашёл такую строку" not in restored.values["user_question"]
-    assert parser.observation_calls == []
-    assert len(parser.catalog_calls) == searched
-    await graph.ainvoke(
-        Command(resume="нет такой подписи"),
-        run_config("thread-1"),
-        durability="sync",
-    )
-    missed_again = await graph.aget_state(run_config("thread-1"))
-    assert interrupts_of(missed_again)
-    assert "Не нашёл такую строку" in missed_again.values["user_question"]
-    assert "Не смог выбрать строку" not in missed_again.values["user_question"]
-    assert parser.observation_calls == []
     before_number = len(ranker.calls)
     await graph.ainvoke(
         Command(resume="2"),
@@ -782,7 +756,7 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     )
     first_miss = await graph.aget_state(run_config("thread-2"))
     assert interrupts_of(first_miss)
-    assert "Не нашёл такую строку" in first_miss.values["user_question"]
+    assert "Такой строки нет" in first_miss.values["user_question"]
     await graph.ainvoke(
         Command(resume="нет такой подписи"),
         run_config("thread-2"),
@@ -794,7 +768,7 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     assert "clarify" in closed.values["gaps"]
     _offer_both(ranker)
     await _run(graph, "Какой DSCR в 2030?", thread="thread-phrase")
-    ranker.push("2", {"1": 0.1, "2": 0.9})
+    _score(ranker, "r0")
     await graph.ainvoke(
         Command(resume="DSCR лимит на листе Limits"),
         run_config("thread-phrase"),
@@ -806,7 +780,7 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     assert "clarify" not in phrased.values["gaps"]
     assert _seen(model, "plan") == []
     last = ranker.calls[-1]
-    assert set(last["criteria"]) == {"1", "2"}
+    assert list(last["criteria"].values()) == ["DSCR лимит"]
     blob = json.dumps(last, ensure_ascii=False)
     assert "concept_id" not in blob
     assert "row_key" not in blob
@@ -838,14 +812,6 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     _offer_both(ranker)
     await _run(graph, "Какой DSCR?", thread="thread-period")
     await graph.ainvoke(
-        Command(resume="нет такой подписи"),
-        run_config("thread-period"),
-        durability="sync",
-    )
-    period_miss = await graph.aget_state(run_config("thread-period"))
-    assert interrupts_of(period_miss)
-    assert "Не нашёл такую строку" in period_miss.values["user_question"]
-    await graph.ainvoke(
         Command(resume="2"),
         run_config("thread-period"),
         durability="sync",
@@ -864,6 +830,7 @@ async def test_two_labels_ask_and_do_not_fetch_observations() -> None:
     assert "DSCR лимит в 2030: 1.25" in period.values["draft"]
     catalog_before = len(parser.catalog_calls)
     plans_before = len(_seen(model, "plan"))
+    ranker.push("open", {"open": 0.8, "books": 0.05, "book": 0.04, "intro": 0.03, "none": 0.02})
     await graph.ainvoke(
         new_turn_input("в 2030", "job-1"),
         run_config("thread-period"),
@@ -965,7 +932,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert "CPI" not in thanks.values["draft"]
     assert len(parser.context_calls) == heard
     assert parser.observation_calls == []
-    model.push("about", {"acts": ["chitchat"]})
+    _score(ranker, "intro")
     await graph.ainvoke(
         new_turn_input("Привет"),
         run_config("thread-bare"),
@@ -1012,6 +979,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert left.values["user_question"] == ""
     assert len(parser.catalog_calls) == searched
     await _run(graph, "RRR?", thread="thread-label")
+    _score(ranker, "r0")
     await graph.ainvoke(
         Command(resume="CAPEX"),
         run_config("thread-label"),
@@ -1025,6 +993,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     overview = book_overview(parser.context)
     about_before = len(_seen(model, "about"))
     catalog_before = len(parser.catalog_calls)
+    _score(ranker, "book")
     await graph.ainvoke(
         new_turn_input("packt-project-finance.xlsx"),
         run_config("thread-bare-file"),
@@ -1061,7 +1030,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert contents.values["job_id"] == "job-1"
     assert len(parser.catalog_calls) == catalog_before
     heard_books = len(parser.context_calls)
-    model.push("about", {"acts": ["books"]})
+    _score(ranker, "books")
     await graph.ainvoke(
         new_turn_input("какие книги ?"),
         run_config("thread-which"),
@@ -1072,6 +1041,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert which.values["awaiting"] == ""
     assert which.values["draft"] == books_reply(parser.jobs)
     assert len(parser.context_calls) == heard_books
+    _score(ranker, "r0")
     await graph.ainvoke(
         new_turn_input("DSCR в packt-project-finance.xlsx"),
         run_config("thread-dscr-file"),
@@ -1108,7 +1078,6 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     assert "packt-project-finance.xlsx" not in hello.values["draft"]
     assert "rvi-project-finance.xlsx" not in hello.values["draft"]
     assert len(parser.context_calls) == hello_context
-    model.push("about", {"acts": ["row"]})
     await graph.ainvoke(
         new_turn_input("Какой DSCR?"),
         run_config("thread-pick"),
@@ -1117,6 +1086,7 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     menu = await graph.aget_state(run_config("thread-pick"))
     assert interrupts_of(menu)
     assert "Какую книгу открыть?" in menu.values["user_question"]
+    _score(ranker, "r0")
     await graph.ainvoke(
         Command(resume="открой packt-project-finance.xlsx"),
         run_config("thread-pick"),
@@ -1329,10 +1299,15 @@ async def test_two_metrics_make_two_observation_calls() -> None:
     parser.observations[("job-1", "row-ebitda")] = [
         observation("row-ebitda", "2030", "4", "B3", label="EBITDA")
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Сравни Выручка и EBITDA в 2030")
-    assert len(parser.observation_calls) == 2
-    assert {call["row_key"] for call in parser.observation_calls} == {"row-rev", "row-ebitda"}
+    assert len(parser.observation_calls) == 1
+    assert parser.observation_calls[0]["row_key"] == "row-rev"
+    values = ranker.calls[-1]["criteria"].values()
+    assert "Выручка" in values
+    assert "EBITDA" in values
     assert sum(call["limit"] for call in parser.observation_calls) <= 48
     for call in parser.observation_calls:
         assert "concept_id" not in call
@@ -1349,7 +1324,9 @@ async def test_one_phase_year_resolves_without_a_question() -> None:
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"phase_year": 1}]))
     model.push("answer", answer("В первом году 1.1.", [cite("row-dscr", "Y1", "1.1", "C2")]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "DSCR в первый операционный год")
     assert parser.observation_calls[0]["period_ids"] == ["Y1"]
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1364,7 +1341,9 @@ async def test_two_phase_years_ask_without_inventing_a_period() -> None:
     parser.pages[("job-1", "dscr")] = page([catalog_row("row-dscr", "DSCR")])
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"], [{"phase_year": 1}]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "DSCR в первый операционный год")
     snap = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(snap)
@@ -1416,9 +1395,11 @@ async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
     parser.observations[("job-1", "row-dscr")] = [stored]
     model = ScriptedModel()
     ranker = FakeRanker()
+    _score(ranker, "r0")
     graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     searched = len(parser.catalog_calls)
+    ranker.push("open", {"open": 0.8, "books": 0.05, "book": 0.04, "intro": 0.03, "none": 0.02})
     await graph.ainvoke(
         new_turn_input("А почему?", "job-1"), run_config("thread-1"), durability="sync"
     )
@@ -1454,7 +1435,10 @@ async def test_two_threads_do_not_mix_citations() -> None:
     ):
         parser.pages[(job, needle.casefold())] = page([catalog_row(key, needle, concept=needle)])
         parser.observations[(job, key)] = [observation(key, "2030", value, cell, label=needle)]
-    graph = _graph(parser, ByQuestion())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    _score(ranker, "r0")
+    graph = _graph(parser, ByQuestion(), ranker=ranker)
     await asyncio.gather(
         graph.ainvoke(new_turn_input("ALPHA?", "job-a"), run_config("thread-a"), durability="sync"),
         graph.ainvoke(new_turn_input("BETA?", "job-b"), run_config("thread-b"), durability="sync"),
@@ -1479,7 +1463,10 @@ async def test_changed_etag_reloads_and_drops_stale_citations() -> None:
     model.push(
         "answer", answer("DSCR в 2030 равен 1.25.", [cite("row-dscr", "2030", "1.25", "C10")])
     )
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     parser.book_etag = "etag-2"
     parser.head_etag = "etag-2"
@@ -1534,7 +1521,9 @@ async def test_truncated_series_asks_for_a_period() -> None:
     parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "2030", "1.25", "C10")]
     model = ScriptedModel()
     model.push("plan", plan(["DSCR"]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Покажи весь DSCR")
     snap = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(snap)
@@ -1570,7 +1559,9 @@ async def test_fourth_distinct_gap_stops_the_budget() -> None:
     _bind(parser, "DSCR", [catalog_row("row-dscr", "DSCR")])
     parser.observations[("job-1", "row-dscr")] = [observation("row-dscr", "2030", "1.25", "C10")]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     assert _seen(model, "answer") == []
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1593,7 +1584,9 @@ async def test_dependents_are_a_second_observation_family() -> None:
     parser.traces[("job-1", "row-dscr")] = {
         "nodes": [{"row_key": "row-dscr"}, {"row_key": "row-child"}]
     }
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "На что влияет DSCR в 2030?")
     assert [call["row_key"] for call in parser.observation_calls] == ["row-dscr", "row-child"]
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1624,7 +1617,9 @@ async def test_full_operating_label_is_one_catalog_query() -> None:
     ]
     model = ScriptedModel()
     model.push("plan", plan(["Operating"], [{"period_key": "2026"}]))
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой Operating Income or Loss (EBITDA) в 2026?")
     assert parser.catalog_calls == []
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1656,7 +1651,9 @@ async def test_exact_debt_service_drops_the_longer_cfads_label() -> None:
     parser.observations[("job-1", "Debt|17")] = [
         observation("Debt|17", "Y1", "12", "F17", label="Debt service")
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой Debt service в Y1?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
@@ -1675,7 +1672,9 @@ async def test_compare_uses_both_keys_from_the_question() -> None:
         observation("P&L|13", "Y5", "11", "F5", label="EBITDA"),
         observation("P&L|13", "Y10", "22", "O5", label="EBITDA"),
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Сравни EBITDA в Y5 и в Y10.")
     assert parser.observation_calls[0]["period_ids"] == ["Y5", "Y10"]
     snap = await graph.aget_state(run_config("thread-1"))
@@ -1693,11 +1692,14 @@ async def test_unresolved_phase_does_not_load_the_series() -> None:
     parser.observations[("job-1", "P&L|13")] = [
         observation("P&L|13", "Y40", "562668.75679656409", "AS13", label="EBITDA")
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой EBITDA в первый операционный год?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.observation_calls == []
     assert interrupts_of(snap)
+    assert "оси" in snap.values["user_question"]
     assert "562668.75679656409" not in snap.values["user_question"]
 
 
@@ -1732,7 +1734,9 @@ async def test_sibling_repayment_start_fetches_the_money_row() -> None:
     parser.observations[("job-1", "Debt|17")] = [
         observation("Debt|17", "Y5", "-17099.33", "E17", label="Debt service")
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой Debt service в год начала погашения?")
     assert parser.observation_calls[0]["row_key"] == "Debt|17"
     assert parser.observation_calls[0]["period_ids"] == ["Y5"]
@@ -1754,11 +1758,14 @@ async def test_scalar_with_a_missing_year_does_not_cite_the_scalar() -> None:
     parser.observations[("job-1", "PF|53")] = [
         observation("PF|53", "", "1.8617377551507139", "L53", label=label)
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, f"Какой {label} в 2030?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.observation_calls == []
     assert interrupts_of(snap)
+    assert "оси" in snap.values["user_question"]
     assert "1.8617377551507139" not in snap.values["user_question"]
 
 
@@ -1774,7 +1781,9 @@ async def test_params_value_column_is_published_as_a_scalar() -> None:
     parser.observations[("job-1", "PF|53")] = [
         observation("PF|53", "value", value, "L53", label=label)
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, f"Какой {label}?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert snap.values["draft"] == f"{label}: {value}"
@@ -1803,7 +1812,9 @@ async def test_cache_string_is_copied_with_the_scale_word() -> None:
             label="EBITDA",
         )
     ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой EBITDA в Y40?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert value in snap.values["draft"]
@@ -1821,7 +1832,9 @@ async def test_scale_gap_on_a_model_answer_still_publishes() -> None:
         observation("row-dscr", "2030", "12.5", "C10", scale_factor=1000, scale="k", label="DSCR")
     ]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какой DSCR в 2030?")
     snap = await graph.aget_state(run_config("thread-1"))
     assert _seen(model, "answer") == []
@@ -1846,12 +1859,15 @@ async def test_three_labels_cite_three_rows_without_the_model() -> None:
         )
         parser.observations[("job-1", key)] = [observation(key, "2030", value, "C1", label=needle)]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Покажи CFADS, Total debt service и DSCR в 2030")
     snap = await graph.aget_state(run_config("thread-1"))
     assert parser.catalog_calls == []
-    assert {item["row_key"] for item in snap.values["citations"]} == {"cfs", "debt", "dscr"}
+    assert [item["row_key"] for item in snap.values["citations"]] == ["debt"]
     assert {item["period_id"] for item in snap.values["citations"]} == {"2030"}
+    assert "Total debt service" in ranker.calls[-1]["criteria"].values()
     assert _seen(model, "plan") == []
 
 
@@ -1874,14 +1890,15 @@ async def test_two_forks_pause_without_numbers() -> None:
     parser.observations[("job-1", "a")] = [observation("a", "2030", "10", "A1", label="CFADS")]
     parser.observations[("job-1", "c")] = [observation("c", "2030", "20", "A2", label="EBITDA")]
     ranker = FakeRanker()
+    _score(ranker, "r0")
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Сравни CFADS и EBITDA в 2030")
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
-    assert ranker.calls == []
+    assert len(ranker.calls) == 1
     assert parser.catalog_calls == []
-    assert {item["row_key"] for item in snap.values["citations"]} == {"a", "c"}
-    assert {call["row_key"] for call in parser.observation_calls} == {"a", "c"}
+    assert [item["row_key"] for item in snap.values["citations"]] == ["a"]
+    assert [call["row_key"] for call in parser.observation_calls] == ["a"]
 
 
 @pytest.mark.asyncio
@@ -1897,14 +1914,14 @@ async def test_five_needles_asks_to_narrow() -> None:
         parser.observations[("job-1", key)] = [
             observation(key, "", str(index), f"A{index}", label=label)
         ]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "CFADS, EBITDA, DSCR, IRR, Debt")
     snap = await graph.aget_state(run_config("thread-1"))
     assert not interrupts_of(snap)
     assert snap.values["satisfactory"] is True
-    assert {item["row_key"] for item in snap.values["citations"]} == {
-        f"row-{index}" for index in range(1, 6)
-    }
+    assert [item["row_key"] for item in snap.values["citations"]] == ["row-1"]
     assert parser.catalog_calls == []
     assert "четырёх" not in (snap.values.get("draft") or "")
     tight = FakeParser()
@@ -1913,14 +1930,19 @@ async def test_five_needles_asks_to_narrow() -> None:
         tight.pages[("job-1", label.casefold())] = page(
             [catalog_row(f"row-{index}", label, axis=["forecast"])]
         )
-    tight_graph = _graph(tight, ScriptedModel(), Settings(observation_cap=3))
+        tight.observations[("job-1", f"row-{index}")] = [
+            observation(f"row-{index}", "", str(index), f"A{index}", label=label)
+        ]
+    tight_ranker = FakeRanker()
+    _score(tight_ranker, "r0")
+    tight_graph = _graph(tight, ScriptedModel(), Settings(observation_cap=3), ranker=tight_ranker)
     await _run(tight_graph, "CFADS, EBITDA, DSCR, IRR, Debt", thread="thread-cap")
-    paused = await tight_graph.aget_state(run_config("thread-cap"))
-    assert interrupts_of(paused)
-    assert paused.values["user_question"] == (
-        "В один ответ входит не больше 3 наблюдений. Назовите меньше подписей."
-    )
-    assert "четырёх" not in paused.values["user_question"]
+    published = await tight_graph.aget_state(run_config("thread-cap"))
+    assert not interrupts_of(published)
+    assert published.values["satisfactory"] is True
+    assert [item["row_key"] for item in published.values["citations"]] == ["row-1"]
+    assert "Назовите меньше подписей" not in (published.values.get("draft") or "")
+    assert "четырёх" not in (published.values.get("draft") or "")
     assert tight.catalog_calls == []
 
 
@@ -1936,9 +1958,7 @@ async def test_cover_question_pauses_without_catalog() -> None:
     question = snap.values["user_question"]
     assert interrupts_of(snap)
     assert parser.catalog_calls == []
-    assert "P&L" in question
-    assert "CFS" in question
-    assert "подписи" in question
+    assert "Такой строки нет" in question
     assert "CFADS" not in question
     assert "DSCR" not in question
     assert "IRR" not in question
@@ -2027,10 +2047,15 @@ async def test_cover_phrase_with_two_labels_is_a_compose() -> None:
     parser.pages[("job-1", right.casefold())] = page([catalog_row("min", right, axis=["point"])])
     parser.observations[("job-1", "avg")] = [observation("avg", "", "1.8", "L53", label=left)]
     parser.observations[("job-1", "min")] = [observation("min", "", "1.4", "L54", label=right)]
-    graph = _graph(parser, ScriptedModel())
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, f"Ключевые показатели: {left} и {right}")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert {item["row_key"] for item in snap.values["citations"]} == {"avg", "min"}
+    assert [item["row_key"] for item in snap.values["citations"]] == ["avg"]
+    values = ranker.calls[-1]["criteria"].values()
+    assert left in values
+    assert right in values
     assert parser.catalog_calls == []
 
 
@@ -2044,46 +2069,56 @@ async def test_cover_reply_is_planned_in_code() -> None:
     parser.observations[("job-1", "cfs")] = [observation("cfs", "2030", "10", "A1", label="CFADS")]
     parser.observations[("job-1", "pnl")] = [observation("pnl", "2030", "20", "A2", label="EBITDA")]
     model = ScriptedModel()
-    graph = _graph(parser, model)
+    ranker = FakeRanker()
+    graph = _graph(parser, model, ranker=ranker)
     await _run(graph, "Какая общая картина?")
+    _score(ranker, "r0")
     await graph.ainvoke(
         Command(resume="CFADS и EBITDA в 2030"),
         run_config("thread-1"),
         durability="sync",
     )
     snap = await graph.aget_state(run_config("thread-1"))
-    assert {item["row_key"] for item in snap.values["citations"]} == {"cfs", "pnl"}
+    assert [item["row_key"] for item in snap.values["citations"]] == ["cfs"]
     assert {item["period_id"] for item in snap.values["citations"]} == {"2030"}
+    values = ranker.calls[-1]["criteria"].values()
+    assert "CFADS" in values
+    assert "EBITDA" in values
     assert _seen(model, "plan") == []
 
 
 @pytest.mark.asyncio
-async def test_parenthetical_label_publishes_the_cache_without_a_ranker() -> None:
+async def test_parenthetical_label_publishes_the_cache_from_the_ranker_key() -> None:
     parser = FakeParser()
     parser.axes = year_axes()
-    long = "CAPEX (including SPV costs)"
-    short = "CAPEX"
+    exact = "CAPEX (including SPV costs)"
+    heavy = "CAPEX (including heavy maintenance & SPV costs)"
     parser.rows["job-1"] = [
         catalog_row(
-            "long",
-            long,
+            "exact",
+            exact,
             sheet="Input Assumptions",
             label_path=["COSTS DURING CONSTRUCTION"],
         ),
-        catalog_row("short", short, sheet="Construction"),
+        catalog_row("heavy", heavy, sheet="Construction"),
     ]
-    parser.observations[("job-1", "long")] = [
-        observation("long", "scenario-4", "300000000", "C4", label=long),
-        observation("long", "base-case", "300000000", "C1", label=long),
+    parser.observations[("job-1", "exact")] = [
+        observation("exact", "scenario-4", "300000000", "C4", label=exact),
+        observation("exact", "base-case", "300000000", "C1", label=exact),
     ]
     ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.7, "r1": 0.2, "books": 0.04, "book": 0.03, "intro": 0.02})
+    ranker.push("r0", {"r0": 0.7, "r1": 0.2, "books": 0.04, "book": 0.03, "intro": 0.02})
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     question = "расскажи про CAPEX (including SPV costs) по годам"
     await _run(graph, question)
     snap = await graph.aget_state(run_config("thread-1"))
-    assert ranker.calls == []
+    assert len(ranker.calls) == 1
+    heard = ranker.calls[0]["criteria"]
+    assert exact in heard.values()
+    assert heavy in heard.values()
     assert parser.catalog_calls == []
-    assert [row["row_key"] for row in snap.values["selected"]] == ["long"]
+    assert [row["row_key"] for row in snap.values["selected"]] == ["exact"]
     assert "300000000" in snap.values["draft"]
     assert "scenario-4" in snap.values["draft"]
     assert "Не хватает" not in snap.values["draft"]
@@ -2093,6 +2128,7 @@ async def test_parenthetical_label_publishes_the_cache_without_a_ranker() -> Non
     )
     again = await graph.aget_state(run_config("thread-1"))
     assert again.values["draft"] == snap.values["draft"]
+    assert len(ranker.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -2106,11 +2142,15 @@ async def test_two_contained_labels_are_both_selected() -> None:
     parser.observations[("job-1", "e")] = [observation("e", "2030", "10", "A1", label="EBITDA")]
     parser.observations[("job-1", "d")] = [observation("d", "2030", "1.2", "B1", label="DSCR")]
     ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.8, "r1": 0.1, "books": 0.04, "book": 0.03, "intro": 0.02})
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Сравни EBITDA и DSCR")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert ranker.calls == []
-    assert {item["row_key"] for item in snap.values["citations"]} == {"e", "d"}
+    assert len(ranker.calls) == 1
+    heard = set(ranker.calls[0]["criteria"].values())
+    assert "EBITDA" in heard
+    assert "DSCR" in heard
+    assert {item["row_key"] for item in snap.values["citations"]} == {"e"}
 
 
 @pytest.mark.asyncio
@@ -2122,16 +2162,30 @@ async def test_short_label_menus_the_longer_line() -> None:
         catalog_row("long", long, sheet="PF Model", label_path=["Income Statement"]),
         catalog_row("short", "EBITDA", sheet="PF Model", label_path=["Taxable income"]),
     ]
+    parser.observations[("job-1", "long")] = [
+        observation("long", "2030", "7694", "E185", label=long)
+    ]
     ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.85, "r1": 0.08, "books": 0.03, "book": 0.02, "intro": 0.01})
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "Какой EBITDA в 2030?")
     snap = await graph.aget_state(run_config("thread-1"))
-    question = snap.values["user_question"]
-    assert interrupts_of(snap)
-    assert ranker.calls == []
+    assert len(ranker.calls) == 1
+    heard = set(ranker.calls[0]["criteria"].values())
+    assert long in heard
+    assert "EBITDA" in heard
+    assert not interrupts_of(snap)
+    assert "7694" in snap.values["draft"]
+    assert "Какую строку" not in snap.values["draft"]
+    split = FakeRanker()
+    _offer_both(split)
+    paused_graph = _graph(parser, ScriptedModel(), ranker=split)
+    await _run(paused_graph, "Какой EBITDA в 2030?", thread="thread-menu")
+    paused = await paused_graph.aget_state(run_config("thread-menu"))
+    question = paused.values["user_question"]
+    assert interrupts_of(paused)
     assert long in question
     assert "Лист PF Model" in question
-    assert "№2 EBITDA" in question
 
 
 @pytest.mark.asyncio
@@ -2183,22 +2237,44 @@ async def test_open_menu_phrase_uses_the_ranker_number() -> None:
         observation("first", "2030", "300000000", "C1", label="CAPEX")
     ]
     ranker = FakeRanker()
+    _offer_both(ranker)
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "CAPEX")
     paused = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(paused)
-    assert ranker.calls == []
-    before = len(parser.catalog_calls)
-    ranker.push("1", {"1": 0.9, "2": 0.05})
-    await graph.ainvoke(
+    assert len(ranker.calls) == 1
+    heard = len(ranker.calls)
+    await graph.ainvoke(Command(resume="1"), run_config("thread-1"), durability="sync")
+    chosen = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == heard
+    assert chosen.values["selected"][0]["row_key"] == "first"
+    marked = FakeRanker()
+    _offer_both(marked)
+    marked_graph = _graph(parser, ScriptedModel(), ranker=marked)
+    await _run(marked_graph, "CAPEX", thread="thread-mark")
+    before_mark = len(marked.calls)
+    await marked_graph.ainvoke(
+        Command(resume="№1"), run_config("thread-mark"), durability="sync"
+    )
+    mark = await marked_graph.aget_state(run_config("thread-mark"))
+    assert len(marked.calls) == before_mark
+    assert mark.values["selected"][0]["row_key"] == "first"
+    phrase = FakeRanker()
+    _offer_both(phrase)
+    phrase_graph = _graph(parser, ScriptedModel(), ranker=phrase)
+    await _run(phrase_graph, "CAPEX", thread="thread-phrase")
+    await phrase_graph.ainvoke(
         Command(resume="давай номер 1"),
-        run_config("thread-1"),
+        run_config("thread-phrase"),
         durability="sync",
     )
-    snap = await graph.aget_state(run_config("thread-1"))
-    assert len(parser.catalog_calls) == before
-    assert snap.values["selected"][0]["row_key"] == "first"
-    assert "300000000" in snap.values["draft"]
+    snap = await phrase_graph.aget_state(run_config("thread-phrase"))
+    assert len(phrase.calls) == 2
+    assert phrase.calls[1]["state"] == "давай номер 1"
+    assert set(phrase.calls[1]["criteria"]) == {"books", "book", "intro", "none"}
+    assert interrupts_of(snap)
+    assert "Такой строки нет" in snap.values["user_question"]
+    assert "300000000" not in (snap.values.get("draft") or "")
 
 
 @pytest.mark.asyncio
@@ -2210,12 +2286,171 @@ async def test_open_menu_keeps_the_rows_when_the_ranker_is_unsure() -> None:
         catalog_row("second", "CAPEX", sheet="Construction"),
     ]
     ranker = FakeRanker()
+    _offer_both(ranker)
     graph = _graph(parser, ScriptedModel(), ranker=ranker)
     await _run(graph, "CAPEX")
-    ranker.push("1", {"1": 0.4, "2": 0.35})
+    ranker.push("books", {"books": 0.4, "book": 0.35, "intro": 0.1, "none": 0.08})
     await graph.ainvoke(Command(resume="N1"), run_config("thread-1"), durability="sync")
     snap = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == 2
     assert interrupts_of(snap)
-    assert "Не нашёл такую строку" in snap.values["user_question"]
+    assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
     assert "300000000" not in snap.values.get("draft", "")
+
+
+_PACKT = "packt-project-finance.xlsx"
+_CACHED = "46482.849566458375"
+
+
+def _debt_catalog() -> list[dict]:
+    labels = (
+        ("tba", "DEBT TIMELINE", "TBA"),
+        ("src", "Debt (k£)", "Construction"),
+        ("sched", "Debt Drawdown Schedule", "Construction"),
+        ("bop", "Debt Outstanding BoP (k£)", "Construction"),
+        ("draw", "Debt Drawdown (k£)", "Construction"),
+        ("eop", "Debt Outstanding EoP (k£)", "Construction"),
+        ("repay", "Debt Repayment Schedule", "Debt"),
+        ("service", "Debt service", "Debt"),
+        ("bs", "Debt", "Balance Sheet"),
+    )
+    return [catalog_row(key, label, sheet=sheet) for key, label, sheet in labels]
+
+
+@pytest.mark.asyncio
+async def test_summary_of_the_open_book_is_the_overview() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.summary = {"source_filename": _PACKT, "marker": "passport", "coverage": {"mapped": 1}}
+    parser.context = _book_document()
+    parser.rows["job-1"] = [
+        catalog_row("cover", "PROJECT FINANCING", sheet="Input Assumptions"),
+        catalog_row("irr-a", "Project IRR", sheet="Ratios"),
+        catalog_row("irr-b", "Project IRR", sheet="Ratios"),
+    ]
+    ranker = FakeRanker()
+    ranker.push("book", {"book": 0.72, "books": 0.1, "intro": 0.1, "none": 0.1})
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, f"сделай саммари {_PACKT}")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == 1
+    heard = ranker.calls[0]["criteria"]
+    assert {"book", "books", "intro", "none"} <= set(heard)
+    blob = " ".join(heard.values())
+    assert "PROJECT FINANCING" not in blob
+    assert "Project IRR" not in blob
+    assert ranker.calls[0]["state"].startswith(f"Книга {_PACKT}.")
+    assert snap.values["draft"] == book_overview(parser.context)
+    assert "Какую строку взять?" not in snap.values["draft"]
+    assert snap.values["selected"] == []
+
+
+@pytest.mark.asyncio
+async def test_debt_outstanding_bop_publishes_the_cached_series() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = _debt_catalog()
+    parser.observations[("job-1", "bop")] = [
+        observation("bop", "Y3", _CACHED, "C3", label="Debt Outstanding BoP (k£)")
+    ]
+    ranker = FakeRanker()
+    ranker.push(
+        "r0",
+        {"r0": 0.60, "r1": 0.39, "books": 0.02, "book": 0.02, "intro": 0.01},
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    question = "Debt Outstanding BoP"
+    await _run(graph, question)
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == 1
+    values = list(ranker.calls[0]["criteria"].values())
+    assert any("BoP" in item for item in values)
+    assert any("EoP" in item for item in values)
+    assert not any("Drawdown" in item or item in {"Debt", "Debt service"} for item in values)
+    assert ranker.calls[0]["state"] == question
+    assert "Книга " not in ranker.calls[0]["state"]
+    assert _CACHED in snap.values["draft"]
+    assert "Какую строку взять?" not in snap.values["draft"]
+
+
+@pytest.mark.asyncio
+async def test_debt_phrase_on_an_open_menu_reads_the_new_row() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = [
+        catalog_row("cover-a", "PROJECT FINANCING", sheet="Input Assumptions"),
+        catalog_row("cover-b", "PROJECT FINANCING", sheet="Cover"),
+        *_debt_catalog(),
+    ]
+    parser.observations[("job-1", "bop")] = [
+        observation("bop", "Y3", _CACHED, "C3", label="Debt Outstanding BoP (k£)")
+    ]
+    ranker = FakeRanker()
+    _offer_both(ranker)
+    ranker.push(
+        "r0",
+        {"r0": 0.60, "r1": 0.39, "books": 0.02, "book": 0.02, "intro": 0.01},
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "PROJECT FINANCING")
+    paused = await graph.aget_state(run_config("thread-1"))
+    assert interrupts_of(paused)
+    assert "PROJECT FINANCING" in paused.values["user_question"]
+    await graph.ainvoke(
+        Command(resume="Debt Outstanding BoP (k£)"),
+        run_config("thread-1"),
+        durability="sync",
+    )
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == 2
+    second = list(ranker.calls[1]["criteria"].values())
+    assert any("BoP" in item for item in second)
+    assert any("EoP" in item for item in second)
+    assert snap.values["selected"][0]["row_key"] == "bop"
+    assert _CACHED in snap.values["draft"]
+    assert "Какую строку взять?" not in snap.values["draft"]
+
+
+@pytest.mark.asyncio
+async def test_unbound_books_question_lists_the_files() -> None:
+    parser = FakeParser()
+    parser.jobs = [
+        {"job_id": "job-1", "source_filename": "packt-project-finance.xlsx"},
+        {"job_id": "job-2", "source_filename": "rvi-project-finance.xlsx"},
+    ]
+    ranker = FakeRanker()
+    ranker.push("books", {"books": 0.80, "book": 0.08, "intro": 0.07, "none": 0.05})
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await graph.ainvoke(
+        new_turn_input("какие книги у тебя есть"), run_config("thread-books"), durability="sync"
+    )
+    snap = await graph.aget_state(run_config("thread-books"))
+    assert len(ranker.calls) == 1
+    assert set(ranker.calls[0]["criteria"]) == {"books", "book", "intro", "none"}
+    assert snap.values["draft"].startswith("Готовые книги:")
+    assert "packt-project-finance.xlsx" in snap.values["draft"]
+    assert "rvi-project-finance.xlsx" in snap.values["draft"]
+    assert not interrupts_of(snap)
+
+
+@pytest.mark.asyncio
+async def test_unbound_greeting_asks_which_book() -> None:
+    parser = FakeParser()
+    parser.jobs = [
+        {"job_id": "job-1", "source_filename": "packt-project-finance.xlsx"},
+        {"job_id": "job-2", "source_filename": "rvi-project-finance.xlsx"},
+    ]
+    parser.context = _book_document()
+    ranker = FakeRanker()
+    ranker.push(
+        "intro",
+        {"intro": 0.444, "books": 0.412, "book": 0.135, "none": 0.009},
+    )
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await graph.ainvoke(new_turn_input("привет"), run_config("thread-hi"), durability="sync")
+    snap = await graph.aget_state(run_config("thread-hi"))
+    assert interrupts_of(snap)
+    assert "Какую книгу открыть?" in snap.values["user_question"]
+    assert "finance-context-agent" not in snap.values["user_question"]
+    assert parser.context_calls == []

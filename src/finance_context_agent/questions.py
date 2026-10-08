@@ -247,22 +247,106 @@ def remainder_needles(
     question: str, names: list[str], axes: list[dict[str, Any]]
 ) -> list[str]:
     """Needles left after the named workbook is removed."""
-    text = question
+    return question_needles(_without_filenames(question, names), axes)
+
+
+def _without_filenames(text: str, filenames: list[str]) -> str:
+    """Drop a workbook name and its stem words before any other word count."""
+    cleaned = text
     segments: list[str] = []
-    for name in names:
-        cleaned = name.strip()
-        if not cleaned:
+    for name in filenames:
+        piece = name.strip()
+        if not piece:
             continue
-        text = re.sub(re.escape(cleaned), " ", text, flags=re.IGNORECASE)
-        segments.extend(file_segments(cleaned))
+        cleaned = re.sub(re.escape(piece), " ", cleaned, flags=re.IGNORECASE)
+        segments.extend(file_segments(piece))
     for segment in sorted(set(segments), key=len, reverse=True):
-        text = re.sub(
+        cleaned = re.sub(
             rf"(?<![0-9A-Za-zА-Яа-яЁё]){re.escape(segment)}(?![0-9A-Za-zА-Яа-яЁё])",
             " ",
-            text,
+            cleaned,
             flags=re.IGNORECASE,
         )
-    return question_needles(text, axes)
+    return cleaned
+
+
+def _choice_words(text: str, filenames: list[str]) -> list[str]:
+    """Words of length 3 or more, after the named workbook is removed."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in _WORD.findall(_without_filenames(text, filenames).casefold()):
+        if len(word) < 3 or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    return words
+
+
+def choice_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Labels that share the reply's words. The top score, and one below it
+    when that neighbor is still a short overlap.
+
+    A score of zero stays out, so a top score of one does not pull in the book.
+    The neighbor is kept for BoP 3 / EoP 2 and for exact CAPEX 4 / the shorter
+    line 3. A score of 1 under a top of 2 would pull in every debt line, and a
+    score of 5 under a specific label of 6 is the shorter copy.
+    At most MENU_CAP distinct labels. Two sheets of one label share one slot.
+    """
+    words = _choice_words(text, list(filenames or []))
+    if not words:
+        return []
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    seen_keys: set[str] = set()
+    for index, row in enumerate(rows):
+        key = str(row.get("row_key") or "")
+        label = str(row.get("label") or "").strip()
+        if not label or (key and key in seen_keys):
+            continue
+        score = sum(1 for word in words if _bounded(label.casefold(), word))
+        if score <= 0:
+            continue
+        if key:
+            seen_keys.add(key)
+        scored.append((score, index, row))
+    if not scored:
+        return []
+    top = max(item[0] for item in scored)
+    bands = [top]
+    if top <= 4 and top - 1 >= 2:
+        bands.append(top - 1)
+    chosen: list[dict[str, Any]] = []
+    taken: set[str] = set()
+    label_count = 0
+    admitted: set[str] = set()
+    for band in bands:
+        for score, _index, row in scored:
+            if score != band:
+                continue
+            key = str(row.get("row_key") or "")
+            if key and key in taken:
+                continue
+            folded = str(row.get("label") or "").strip().casefold()
+            if folded not in admitted:
+                if label_count >= MENU_CAP:
+                    continue
+                admitted.add(folded)
+                label_count += 1
+            if key:
+                taken.add(key)
+            chosen.append(row)
+    return chosen
+
+
+def ranker_state(filename: str, text: str, has_rows: bool) -> str:
+    """Utterance alone when a row is offered. The book name only on an empty pool."""
+    if has_rows:
+        return text
+    name = filename.strip()
+    if name:
+        return f"Книга {name}. {text}"
+    return text
 
 
 def _strip_cover(question: str) -> tuple[str, bool]:
