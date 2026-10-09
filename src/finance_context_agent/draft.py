@@ -1,13 +1,15 @@
-"""Sentence copied from the cached cell, its formula, and its direct inputs."""
+"""Cached cells, laid out as sentences or a table. The model never writes the numbers."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from finance_context_agent.citations import direct_precedents
+from finance_context_agent.questions import _pipe_table
 from finance_context_agent.text_numbers import scale_display, scale_factor_is_unit
 
 _STATUS_WORDS = {"empty": "пусто", "not_applicable": "не применимо"}
+_PERIOD_COLUMNS = 4
 
 
 def cache_answer(state: dict[str, Any]) -> dict[str, Any]:
@@ -28,11 +30,7 @@ def cache_answer(state: dict[str, Any]) -> dict[str, Any]:
             for period_id in period_ids
         )
         if missing:
-            return {
-                "draft": "Подтверждённого числа в срезе нет.",
-                "citations": [],
-                "missing": True,
-            }
+            return _missing()
         ordered = []
         for row in selected:
             for period_id in period_ids:
@@ -49,24 +47,140 @@ def cache_answer(state: dict[str, Any]) -> dict[str, Any]:
         for item in scoped:
             grouped.setdefault(str(item.get("row_key")), []).append(item)
         if any(not grouped.get(str(row.get("row_key"))) for row in selected):
-            return {
-                "draft": "Подтверждённого числа в срезе нет.",
-                "citations": [],
-                "missing": True,
-            }
+            return _missing()
         ordered = []
         for row in selected:
             ordered.extend(grouped[str(row.get("row_key"))])
     explain = _explains(state)
-    lines: list[str] = []
-    citations: list[dict[str, Any]] = []
-    for item in ordered:
-        line, citation = _line_from_observation(item)
-        if explain:
-            line = "\n".join([line, *_formula_lines(item)])
-        lines.append(line)
-        citations.append(citation)
-    return {"draft": "\n".join(lines), "citations": citations, "missing": False}
+    citations = [_line_from_observation(item)[1] for item in ordered]
+    draft = render_frame(ordered, "sentence", explain=explain)
+    return {
+        "draft": draft,
+        "citations": citations,
+        "missing": False,
+        "observations": ordered,
+    }
+
+
+def _missing() -> dict[str, Any]:
+    return {
+        "draft": "Подтверждённого числа в срезе нет.",
+        "citations": [],
+        "missing": True,
+        "observations": [],
+    }
+
+
+def frame_summary(state: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the view model may see. Cell values, addresses, and formulas stay out."""
+    labels: list[str] = []
+    periods: list[str] = []
+    statuses: list[str] = []
+    scales: list[str] = []
+    for item in observations:
+        point, _citation = _point_from_observation(item)
+        if point["label"] not in labels:
+            labels.append(point["label"])
+        if point["period"] not in periods:
+            periods.append(point["period"])
+        status = str(scalar_observation(item).get("value_status") or "")
+        if status not in statuses:
+            statuses.append(status)
+        if status in _STATUS_WORDS or status == "zero_explicit":
+            continue
+        word = _published_scale(scalar_observation(item))
+        if word and word not in scales:
+            scales.append(word)
+    return {
+        "question": str(state.get("question") or ""),
+        "points": len(observations),
+        "labels": labels,
+        "periods": periods,
+        "statuses": statuses,
+        "scales": scales,
+        "explain": _explains(state),
+    }
+
+
+def legal_views(summary: dict[str, Any], observations: list[dict[str, Any]]) -> list[str]:
+    """Orientations this frame can show. A repeated pair would collapse a citation."""
+    views = ["sentence"]
+    pairs = [_pair(item) for item in observations]
+    if len(pairs) != len(set(pairs)):
+        return views
+    periods = [str(item) for item in (summary.get("periods") or [])]
+    points = int(summary.get("points") or 0)
+    if points < 2 and not any(periods):
+        return views
+    views.append("table-period")
+    if len(set(periods)) <= _PERIOD_COLUMNS:
+        views.append("table-label")
+    return views
+
+
+def render_frame(
+    observations: list[dict[str, Any]], view: str, *, explain: bool = False
+) -> str:
+    points = [_point_from_observation(item)[0] for item in observations]
+    if view == "table-period":
+        body = _table_period(points)
+    elif view == "table-label":
+        body = _table_label(points)
+    else:
+        body = "\n".join(_sentence(point) for point in points)
+    if not explain:
+        return body
+    if view == "sentence" and len(points) == 1:
+        return body + "\n" + "\n".join(_formula_lines(observations[0]))
+    # A blank line keeps the formula from becoming another table row.
+    blocks: list[str] = []
+    for item, point in zip(observations, points, strict=True):
+        if point["period"]:
+            blocks.append(point["period"])
+        blocks.extend(_formula_lines(item))
+    return body + "\n\n" + "\n".join(blocks)
+
+
+def _pair(item: dict[str, Any]) -> tuple[str, str]:
+    folded = scalar_observation(item)
+    return str(folded.get("row_key") or ""), str(folded.get("period_id") or "")
+
+
+def _table_period(points: list[dict[str, str]]) -> str:
+    labels, periods, cells = _grid(points)
+    rows = [
+        [period, *[cells.get((label, period), "") for label in labels]] for period in periods
+    ]
+    return _pipe_table(["Период", *labels], rows)
+
+
+def _table_label(points: list[dict[str, str]]) -> str:
+    labels, periods, cells = _grid(points)
+    rows = [
+        [label, *[cells.get((label, period), "") for period in periods]] for label in labels
+    ]
+    return _pipe_table(["Подпись", *periods], rows)
+
+
+def _grid(
+    points: list[dict[str, str]],
+) -> tuple[list[str], list[str], dict[tuple[str, str], str]]:
+    labels: list[str] = []
+    periods: list[str] = []
+    cells: dict[tuple[str, str], str] = {}
+    for point in points:
+        if point["label"] not in labels:
+            labels.append(point["label"])
+        if point["period"] not in periods:
+            periods.append(point["period"])
+        cells[(point["label"], point["period"])] = point["text"]
+    return labels, periods, cells
+
+
+def _sentence(point: dict[str, str]) -> str:
+    if point["period"]:
+        return f"{point['label']} в {point['period']}: {point['text']}"
+    return f"{point['label']}: {point['text']}"
 
 
 def _explains(state: dict[str, Any]) -> bool:
@@ -120,6 +234,11 @@ def scalar_observation(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    point, citation = _point_from_observation(item)
+    return _sentence(point), citation
+
+
+def _point_from_observation(item: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     item = scalar_observation(item)
     status = str(item.get("value_status") or "")
     label = str(item.get("label") or item.get("row_key") or "")
@@ -134,10 +253,6 @@ def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             suffix = _published_scale(item)
             if suffix:
                 text_value = f"{text_value} {suffix}"
-    if period_id:
-        line = f"{label} в {period_id}: {text_value}"
-    else:
-        line = f"{label}: {text_value}"
     citation: dict[str, Any] = {
         "row_key": item.get("row_key"),
         "period_id": period_id,
@@ -148,7 +263,8 @@ def _line_from_observation(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     normalized = item.get("normalized_value")
     if normalized not in (None, ""):
         citation["normalized_value"] = normalized
-    return line, citation
+    point = {"label": label, "period": period_id, "text": text_value}
+    return point, citation
 
 
 def _published_scale(item: dict[str, Any]) -> str:

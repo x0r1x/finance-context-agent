@@ -21,12 +21,19 @@ from finance_context_agent.catalog import (
 from finance_context_agent.citations import verify_answer, wants_influence
 from finance_context_agent.clients.llm import JsonModel, ModelError, SchemaError
 from finance_context_agent.clients.parser import ParserClient, ParserError
-from finance_context_agent.draft import cache_answer, scalar_observation
+from finance_context_agent.draft import (
+    cache_answer,
+    frame_summary,
+    legal_views,
+    render_frame,
+    scalar_observation,
+)
 from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import (
     about_messages,
     answer_messages,
     talk_messages,
+    view_messages,
     without_account_code,
 )
 from finance_context_agent.questions import (
@@ -345,8 +352,11 @@ def build_graph(
     async def answer(state: dict[str, Any]) -> dict[str, Any]:
         if (state.get("plan") or {}).get("source") == "question":
             built = cache_answer(state)
+            draft = built["draft"]
+            if not built["missing"]:
+                draft = await _laid_out(state, list(built["observations"]))
             return {
-                "draft": built["draft"],
+                "draft": draft,
                 "proposed_citations": built["citations"],
                 "draft_from_cache": True,
                 "cache_missing": built["missing"],
@@ -374,6 +384,23 @@ def build_graph(
             "schema_error": False,
             "terminal": "",
         }
+
+    async def _laid_out(state: dict[str, Any], observations: list[dict[str, Any]]) -> str:
+        summary = frame_summary(state, observations)
+        options = legal_views(summary, observations)
+        system, user = view_messages(summary)
+        try:
+            parsed = await model.complete_json(
+                role="view", system=system, user=user, options=options
+            )
+        except (SchemaError, ModelError):
+            # The numbers are already retrieved. A failed view still prints the cache.
+            logger.info("view fallback")
+            chosen = "table-period" if "table-period" in options else "sentence"
+        else:
+            chosen = str(parsed["view"])
+            logger.info("view %s", chosen)
+        return render_frame(observations, chosen, explain=bool(summary["explain"]))
 
     async def check(state: dict[str, Any]) -> dict[str, Any]:
         if state.get("schema_error"):

@@ -946,17 +946,28 @@ def _markdown_cell(value: str) -> str:
     return text.replace("|", "\\|")
 
 
+def _pipe_row(cells: list[str]) -> str:
+    shown: list[str] = []
+    for value in cells:
+        text = _markdown_cell(value)
+        shown.append(f" {text} " if text else " ")
+    return "|" + "|".join(shown) + "|"
+
+
+def _pipe_table(headers: list[str], rows: list[list[str]]) -> str:
+    """GFM table. A short row is an assembly error, not a cell to fill with zero."""
+    width = len(headers)
+    lines = [_pipe_row(headers), "|" + "|".join([" --- "] * width) + "|"]
+    for row in rows:
+        if len(row) != width:
+            raise ValueError(f"table row has {len(row)} cells for {width} headers")
+        lines.append(_pipe_row(row))
+    return "\n".join(lines)
+
+
 def _markdown_table(pairs: list[tuple[str, str]]) -> str:
     """Attribute and section. An empty section stays an empty cell."""
-    lines = ["| Атрибут | Раздел |", "| --- | --- |"]
-    for label, heading in pairs:
-        name = _markdown_cell(label)
-        section = _markdown_cell(heading)
-        if section:
-            lines.append(f"| {name} | {section} |")
-        else:
-            lines.append(f"| {name} | |")
-    return "\n".join(lines)
+    return _pipe_table(["Атрибут", "Раздел"], [[label, heading] for label, heading in pairs])
 
 
 def catalog_reply(rows: list[dict[str, Any]], text: str) -> str:

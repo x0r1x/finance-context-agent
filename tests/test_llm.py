@@ -4,11 +4,13 @@ import httpx
 import pytest
 
 from finance_context_agent.clients.llm import (
+    _MODELS,
     ModelError,
     OpenAIChat,
     Plan,
     SchemaError,
     chat_completions_url,
+    response_format_for,
 )
 
 
@@ -198,6 +200,51 @@ def _assert_strict_schema(node: object) -> None:
     elif isinstance(node, list):
         for item in node:
             _assert_strict_schema(item)
+
+
+@pytest.mark.asyncio
+async def test_view_schema_is_the_orientations_of_this_frame() -> None:
+    assert "view" not in _MODELS
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        body = {"choices": [{"message": {"content": '{"view":"table-period"}'}}]}
+        return httpx.Response(200, json=body)
+
+    chat = _chat(handler)
+    parsed = await chat.complete_json(
+        role="view",
+        system="s",
+        user="u",
+        options=["sentence", "table-period"],
+    )
+    await chat.aclose()
+    assert parsed == {"view": "table-period"}
+    schema = seen[0]["response_format"]["json_schema"]["schema"]
+    assert schema == response_format_for("view", ["sentence", "table-period"])["json_schema"][
+        "schema"
+    ]
+    assert schema["properties"]["view"]["enum"] == ["sentence", "table-period"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["view"]
+    calls = {"n": 0}
+
+    def reject(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = {"choices": [{"message": {"content": '{"view":"table-label","index":0}'}}]}
+        return httpx.Response(200, json=body)
+
+    closed = _chat(reject)
+    with pytest.raises(SchemaError):
+        await closed.complete_json(
+            role="view",
+            system="s",
+            user="u",
+            options=["sentence", "table-period"],
+        )
+    assert calls["n"] == 2
+    await closed.aclose()
 
 
 def test_blank_period_is_absent_and_a_partial_one_stays() -> None:

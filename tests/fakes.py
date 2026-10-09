@@ -400,9 +400,18 @@ class ScriptedModel:
         user: str,
         options: list[str] | None = None,
     ) -> dict[str, Any]:
-        self.seen.append({"role": role, "system": system, "user": user})
+        self.seen.append(
+            {
+                "role": role,
+                "system": system,
+                "user": user,
+                "options": "" if options is None else json.dumps(options, ensure_ascii=False),
+            }
+        )
         queue = self.queues.setdefault(role, [])
         if not queue:
+            if role == "view":
+                return {"view": "sentence"}
             raise AssertionError(f"no script for {role}")
         item = queue.pop(0)
         if item == "bad":
@@ -428,7 +437,16 @@ class ByQuestion:
         user: str,
         options: list[str] | None = None,
     ) -> dict[str, Any]:
-        self.seen.append({"role": role, "system": system, "user": user})
+        self.seen.append(
+            {
+                "role": role,
+                "system": system,
+                "user": user,
+                "options": "" if options is None else json.dumps(options, ensure_ascii=False),
+            }
+        )
+        if role == "view":
+            return {"view": "sentence"}
         data = json.loads(user)
         question = str(data.get("question") or "")
         if "ALPHA" in question:

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -669,6 +670,7 @@ async def test_repeated_gap_is_not_satisfactory() -> None:
     assert "Не хватает" not in snap.values["draft"]
     assert snap.values["gaps"] == []
     assert _seen(model, "answer") == []
+    assert _seen(model, "view") == []
 
 
 @pytest.mark.asyncio
@@ -3028,7 +3030,8 @@ async def test_explain_follows_the_open_row_and_a_bare_period_does_not_embed() -
     )
     explained = await graph.aget_state(run_config("thread-1"))
     assert explained.values["satisfactory"] is True
-    assert "=H10/I10" in explained.values["draft"]
+    assert explained.values["draft"].startswith("DSCR в 2030: 1.25\nФормула C10: =H10/I10")
+    assert "| Период |" not in explained.values["draft"]
     assert explained.values["last_act"] == "explain"
     assert "Лист " not in explained.values["draft"]
     assert parser.observation_calls[-1]["precedent_depth"] == 2
@@ -3046,3 +3049,178 @@ async def test_explain_follows_the_open_row_and_a_bare_period_does_not_embed() -
     ]
     assert len(embedder.calls) == heard
     assert len(ranker.calls) == 1
+
+
+_CONCESSION = "Concession Duration"
+_CONCESSION_TABLE = (
+    "| Период | Concession Duration |\n"
+    "| --- | --- |\n"
+    "| | 40 |\n"
+    "| base-case | 40 |\n"
+    "| scenario-2 | 36.5 |\n"
+    "| gearing | 38 |\n"
+    "| scenario-4 | 35.5 |"
+)
+_CONCESSION_SENTENCES = "\n".join(
+    [
+        "Concession Duration: 40",
+        "Concession Duration в base-case: 40",
+        "Concession Duration в scenario-2: 36.5",
+        "Concession Duration в gearing: 38",
+        "Concession Duration в scenario-4: 35.5",
+    ]
+)
+
+
+def _concession_parser() -> FakeParser:
+    parser = FakeParser()
+    parser.axes = [{"id": "scenarios", "periods": []}]
+    parser.pages[("job-1", _CONCESSION.casefold())] = page(
+        [catalog_row("in|duration", _CONCESSION, axis=["scenarios"])]
+    )
+    parser.observations[("job-1", "in|duration")] = [
+        observation("in|duration", "value", "40", "B1", label=_CONCESSION),
+        observation("in|duration", "base-case", "40", "C1", label=_CONCESSION),
+        observation("in|duration", "scenario-2", "36.5", "C2", label=_CONCESSION),
+        observation("in|duration", "gearing", "38", "C3", label=_CONCESSION),
+        observation("in|duration", "scenario-4", "35.5", "C4", label=_CONCESSION),
+    ]
+    return parser
+
+
+async def _concession(model: ScriptedModel) -> dict:
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(_concession_parser(), model, ranker=ranker)
+    await _run(graph, _CONCESSION)
+    snap = await graph.aget_state(run_config("thread-1"))
+    return snap.values
+
+
+def _view_options(model: ScriptedModel) -> list[str]:
+    seen = _seen(model, "view")
+    assert len(seen) == 1
+    return json.loads(seen[0]["options"])
+
+
+@pytest.mark.asyncio
+async def test_table_period_lays_concession_duration_out_by_period() -> None:
+    model = ScriptedModel()
+    model.push("view", {"view": "table-period"})
+    values = await _concession(model)
+    assert values["draft"] == _CONCESSION_TABLE
+    assert "Concession Duration в base-case:" not in values["draft"]
+    assert "в value" not in values["draft"]
+    assert [item["period_id"] for item in values["citations"]] == [
+        "",
+        "base-case",
+        "scenario-2",
+        "gearing",
+        "scenario-4",
+    ]
+    assert [item["value"] for item in values["citations"]] == ["40", "40", "36.5", "38", "35.5"]
+    assert _view_options(model) == ["sentence", "table-period"]
+    summary = json.loads(_seen(model, "view")[0]["user"])
+    assert set(summary) == {
+        "question",
+        "points",
+        "labels",
+        "periods",
+        "statuses",
+        "scales",
+        "explain",
+    }
+    assert summary["points"] == 5
+    assert "36.5" not in _seen(model, "view")[0]["user"]
+    assert "concept_id" not in _seen(model, "view")[0]["user"]
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_sentence_stays_a_sentence() -> None:
+    model = ScriptedModel()
+    model.push("view", {"view": "sentence"})
+    values = await _concession(model)
+    assert values["draft"] == _CONCESSION_SENTENCES
+    assert "| Период |" not in values["draft"]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_pair_offers_only_a_sentence() -> None:
+    parser = _concession_parser()
+    parser.observations[("job-1", "in|duration")] = [
+        observation("in|duration", "base-case", "40", "C1", label=_CONCESSION),
+        observation("in|duration", "base-case", "41", "C9", label=_CONCESSION),
+    ]
+    model = ScriptedModel()
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
+    await _run(graph, _CONCESSION)
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert _view_options(model) == ["sentence"]
+    assert "| Период |" not in snap.values["draft"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_view_still_prints_the_period_table(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="finance_context_agent.graph")
+    model = ScriptedModel()
+    model.push("view", "bad")
+    model.push("view", "bad")
+    values = await _concession(model)
+    assert values["draft"] == _CONCESSION_TABLE
+    assert values["satisfactory"] is True
+    messages = [record.message for record in caplog.records]
+    assert "view fallback" in messages
+    assert "view table-period" not in messages
+    assert model.queues["view"] == ["bad"]
+
+
+@pytest.mark.asyncio
+async def test_a_dead_view_is_not_an_upstream_failure(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="finance_context_agent.graph")
+    model = ScriptedModel()
+    model.push("view", "boom")
+    values = await _concession(model)
+    assert values["draft"] == _CONCESSION_TABLE
+    assert "upstream_unavailable" not in values["draft"]
+    assert "view fallback" in [record.message for record in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_two_explained_points_keep_formulas_under_the_table() -> None:
+    parser = FakeParser()
+    parser.axes = [
+        {"id": "forecast", "periods": [{"period_key": "Y1"}, {"period_key": "Y2"}]}
+    ]
+    parser.pages[("job-1", "dscr")] = page(
+        [catalog_row("row-dscr", "DSCR", axis=["forecast"])]
+    )
+    first = observation("row-dscr", "Y1", "1.10", "C1", label="DSCR")
+    first["formula"] = {
+        "text": "=H10/I10",
+        "precedents": [{"cell": "H10", "label": "CFADS", "value": "15", "depth": 1}],
+    }
+    second = observation("row-dscr", "Y2", "1.25", "C2", label="DSCR")
+    second["formula"] = {
+        "text": "=I10/J10",
+        "precedents": [{"cell": "I10", "label": "CFADS", "value": "20", "depth": 1}],
+    }
+    parser.observations[("job-1", "row-dscr")] = [first, second]
+    model = ScriptedModel()
+    model.push("view", {"view": "table-period"})
+    ranker = FakeRanker()
+    _score(ranker, "r0")
+    graph = _graph(parser, model, ranker=ranker)
+    await _run(graph, "Как считается DSCR")
+    snap = await graph.aget_state(run_config("thread-1"))
+    head, tail = snap.values["draft"].split("\n\n", 1)
+    assert head.startswith("| Период | DSCR |")
+    assert "| Y1 | 1.10 |" in head
+    assert "| Y2 | 1.25 |" in head
+    assert tail.startswith("Y1\n")
+    assert "=H10/I10" in tail
+    assert "=I10/J10" in tail
+    assert "\n\n" not in tail

@@ -168,6 +168,8 @@ def response_format_for(role: str, options: list[str] | None = None) -> dict[str
     """OpenAI Chat Completions structured output for one graph role."""
     if role == "choose":
         schema = _choose_schema(options)
+    elif role == "view":
+        schema = _view_schema(options)
     else:
         schema = _strict_json_schema(_MODELS[role])
     return {
@@ -193,6 +195,22 @@ def _choose_schema(options: list[str] | None) -> dict[str, Any]:
         "properties": {"option": {"type": "string", "enum": _choice_enum(options)}},
         "additionalProperties": False,
         "required": ["option"],
+    }
+
+
+def _view_enum(options: list[str] | None) -> list[str]:
+    values = [str(item) for item in (options or [])]
+    if "sentence" not in values:
+        raise ValueError("view requires sentence")
+    return values
+
+
+def _view_schema(options: list[str] | None) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"view": {"type": "string", "enum": _view_enum(options)}},
+        "additionalProperties": False,
+        "required": ["view"],
     }
 
 
@@ -325,6 +343,14 @@ def _accept_json(
         if not isinstance(option, str) or option not in allowed:
             return None
         return {"option": option}
+    if role == "view":
+        allowed = set(_view_enum(options))
+        if set(parsed) != {"view"}:
+            return None
+        view = parsed.get("view")
+        if not isinstance(view, str) or view not in allowed:
+            return None
+        return {"view": view}
     try:
         return _MODELS[role].model_validate(parsed).model_dump(mode="json")
     except ValidationError:

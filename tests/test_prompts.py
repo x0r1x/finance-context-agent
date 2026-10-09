@@ -1,4 +1,6 @@
-from finance_context_agent.prompts import answer_messages, plan_messages
+import json
+
+from finance_context_agent.prompts import answer_messages, plan_messages, view_messages
 from tests.fakes import observation
 
 
@@ -58,3 +60,27 @@ def test_answer_prompt_omits_the_account_code() -> None:
     assert "cf.cfads" not in user
     assert "DSCR" in user
     assert "1.25" in user
+
+
+def test_view_prompt_describes_the_layouts_and_carries_only_the_summary() -> None:
+    system, user = view_messages(
+        {
+            "question": "ряд",
+            "points": 2,
+            "labels": ["A"],
+            "periods": ["Y1", "Y2"],
+            "statuses": ["cached"],
+            "scales": [],
+            "explain": False,
+        }
+    )
+    assert system == (
+        "Выбери вид уже собранного кадра. sentence — каждая точка отдельной фразой. "
+        "table-period — строки это периоды, столбцы это подписи. "
+        "table-label — строки это подписи, столбцы это периоды. "
+        "Несколько точек одной подписи удобнее таблицей. "
+        "Если точка одна и вопрос не просит разложить точки, выбери sentence. "
+        "Числа не пиши."
+    )
+    assert json.loads(user)["question"] == "ряд"
+    assert "36.5" not in system

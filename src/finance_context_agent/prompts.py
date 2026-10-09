@@ -1,4 +1,4 @@
-"""Prompts for the planner, the book-or-row check, the menu choice, and the answer."""
+"""Prompts for the planner, the book-or-row check, the menu choice, the view, and the answer."""
 
 from __future__ import annotations
 
@@ -114,6 +114,19 @@ def without_account_code(value: Any) -> Any:
     if isinstance(value, list):
         return [without_account_code(item) for item in value]
     return value
+
+
+def view_messages(summary: dict[str, Any]) -> tuple[str, str]:
+    """Which way to lay out a frame. The summary has no cell values."""
+    system = (
+        "Выбери вид уже собранного кадра. sentence — каждая точка отдельной фразой. "
+        "table-period — строки это периоды, столбцы это подписи. "
+        "table-label — строки это подписи, столбцы это периоды. "
+        "Несколько точек одной подписи удобнее таблицей. "
+        "Если точка одна и вопрос не просит разложить точки, выбери sentence. "
+        "Числа не пиши."
+    )
+    return system, json.dumps(summary, ensure_ascii=False)
 
 
 def answer_messages(state: dict[str, Any]) -> tuple[str, str]:
