@@ -10,6 +10,7 @@ from finance_context_agent.questions import (
     goal_question,
     inventory_rows,
     match_goal,
+    named_label_rows,
     prototype_decision,
     ranker_state,
 )
@@ -69,6 +70,53 @@ def test_capex_phrase_keeps_the_exact_line_and_the_shorter_one() -> None:
 def test_debt_service_does_not_pull_the_score_one_lines() -> None:
     labels = [row["label"] for row in choice_rows("Какой Debt service в Y1?", _debt_rows())]
     assert labels == ["Debt service"]
+
+
+def test_named_label_is_that_row() -> None:
+    rows = _debt_rows() + [
+        catalog_row("cfads", "Cash Flow Available for Debt Service (CFADS)", sheet="CFS"),
+        catalog_row("amount", "Total Debt Amount (k£)", sheet="Construction"),
+        catalog_row("conc", "Concession Duration", sheet="Input Assumptions"),
+        catalog_row("build", "Construction Duration", sheet="Input Assumptions"),
+        catalog_row("ops", "Operations Duration", sheet="Input Assumptions"),
+        catalog_row("infl", "Inflation per year (costs) from beginning of concession"),
+        catalog_row("end", "Cash out End of Concession", sheet="Ratios"),
+        catalog_row("irr-a", "Project IRR", sheet="Ratios"),
+        catalog_row("irr-b", "Project IRR", sheet="Cover"),
+    ]
+    assert [row["row_key"] for row in named_label_rows("Debt service", rows) or []] == ["service"]
+    assert [row["row_key"] for row in named_label_rows("Debt Outstanding BoP", rows) or []] == [
+        "bop"
+    ]
+    assert [row["row_key"] for row in named_label_rows("Concession Duration", rows) or []] == [
+        "conc"
+    ]
+    assert [row["row_key"] for row in named_label_rows("Project IRR", rows) or []] == [
+        "irr-a",
+        "irr-b",
+    ]
+    named = named_label_rows(f"Debt service {_FILE}", rows, [_FILE])
+    assert [row["row_key"] for row in named or []] == ["service"]
+
+
+def test_a_question_or_a_shared_word_is_not_a_named_label() -> None:
+    rows = _debt_rows() + [
+        catalog_row("cfads", "Cash Flow Available for Debt Service (CFADS)", sheet="CFS"),
+        catalog_row("long", "CAPEX (including SPV costs)", sheet="Input Assumptions"),
+        catalog_row("bare", "CAPEX", sheet="Construction"),
+        catalog_row("short", "CAPEX (incl. SPV costs)", sheet="Ratios"),
+        catalog_row("pl", "P&L", sheet="P&L"),
+    ]
+    for text in (
+        "на каком листе Debt service",
+        "перечисли строки про Debt",
+        "Какой Debt service в Y1?",
+        "CAPEX",
+        "Debt",
+        "Debt (k£)",
+        "P&L",
+    ):
+        assert named_label_rows(text, rows) is None
 
 
 def test_a_specific_long_label_does_not_keep_the_shorter_copy() -> None:

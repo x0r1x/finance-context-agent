@@ -54,6 +54,7 @@ from finance_context_agent.questions import (
     inventory_rows,
     match_goal,
     name_tokens,
+    named_label_rows,
     prototype_decision,
     ranker_state,
     sole_period_key,
@@ -1347,6 +1348,14 @@ async def _rank_labels(
     settings: Settings,
 ) -> dict[str, Any]:
     """One choice. The returned key is the row, the overview, or the pause."""
+    named = named_label_rows(text, catalog_rows, filenames)
+    if named:
+        label = str(named[0].get("label") or "").strip()
+        logger.info("named label %s", label)
+        ready = _from_hits(state, named, _named_periods(state, text), settings)
+        if ready.get("selected") and not ready.get("awaiting"):
+            return ready | {"last_act": "figure"}
+        return ready
     if ranker is None:
         raise ModelError("ranker")
     criteria, by_key = _choice_criteria(pool, state)

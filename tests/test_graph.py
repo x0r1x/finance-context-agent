@@ -2300,7 +2300,7 @@ async def test_open_menu_phrase_uses_the_ranker_number() -> None:
     await _run(graph, "CAPEX")
     paused = await graph.aget_state(run_config("thread-1"))
     assert interrupts_of(paused)
-    assert len(ranker.calls) == 1
+    assert ranker.calls == []
     heard = len(ranker.calls)
     await graph.ainvoke(Command(resume="1"), run_config("thread-1"), durability="sync")
     chosen = await graph.aget_state(run_config("thread-1"))
@@ -2329,7 +2329,7 @@ async def test_open_menu_phrase_uses_the_ranker_number() -> None:
         durability="sync",
     )
     snap = await phrase_graph.aget_state(run_config("thread-phrase"))
-    assert len(phrase.calls) == 1
+    assert phrase.calls == []
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
     assert "300000000" not in (snap.values.get("draft") or "")
@@ -2351,7 +2351,7 @@ async def test_open_menu_keeps_the_rows_when_the_ranker_is_unsure() -> None:
     await _run(graph, "CAPEX")
     await graph.ainvoke(Command(resume="N1"), run_config("thread-1"), durability="sync")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert len(ranker.calls) == 1
+    assert ranker.calls == []
     assert interrupts_of(snap)
     assert "Такой строки нет" in snap.values["user_question"]
     assert parser.observation_calls == []
@@ -2412,24 +2412,69 @@ async def test_debt_outstanding_bop_publishes_the_cached_series() -> None:
     ]
     ranker = FakeRanker()
     embedder = FakeEmbed()
-    ranker.push(
-        "r0",
-        {"r0": 0.60, "r1": 0.39, "books": 0.02, "book": 0.02, "intro": 0.01},
-    )
+    ranker.push("r0", {"r0": 0.60, "r1": 0.39}, sheets=0.90)
     graph = _graph(parser, ScriptedModel(), ranker=ranker, embedder=embedder)
-    question = "Debt Outstanding BoP"
-    await _run(graph, question)
+    await _run(graph, "Debt Outstanding BoP")
     snap = await graph.aget_state(run_config("thread-1"))
-    assert len(ranker.calls) == 1
-    values = list(ranker.calls[0]["criteria"].values())
-    assert any("BoP" in item for item in values)
-    assert any("EoP" in item for item in values)
-    assert not any("Drawdown" in item or item in {"Debt", "Debt service"} for item in values)
-    assert ranker.calls[0]["state"] == question
-    assert "Книга " not in ranker.calls[0]["state"]
+    assert ranker.calls == []
     assert _CACHED in snap.values["draft"]
+    assert "EoP" not in snap.values["draft"]
+    assert "DEBT TIMELINE" not in snap.values["draft"]
     assert "Какую строку взять?" not in snap.values["draft"]
     assert embedder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_named_debt_service_publishes_the_row_when_sheets_score_is_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = [
+        *_debt_catalog(),
+        catalog_row("cfads", "Cash Flow Available for Debt Service (CFADS)", sheet="CFS"),
+    ]
+    parser.observations[("job-1", "service")] = [
+        observation("service", "Y1", "12.5", "F17", label="Debt service")
+    ]
+    ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.97, "r1": 0.02}, sheets=0.90)
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    with caplog.at_level(logging.INFO, logger="finance_context_agent.graph"):
+        await _run(graph, "Debt service")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert ranker.calls == []
+    assert parser.observation_calls[0]["row_key"] == "service"
+    assert snap.values["citations"][0]["row_key"] == "service"
+    assert snap.values["citations"][0]["value"] == "12.5"
+    assert "DEBT TIMELINE" not in snap.values["draft"]
+    assert "CFADS" not in snap.values["draft"]
+    assert "named label Debt service" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_where_question_still_lists_the_debt_sheets() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.rows["job-1"] = [
+        *_debt_catalog(),
+        catalog_row("cfads", "Cash Flow Available for Debt Service (CFADS)", sheet="CFS"),
+    ]
+    parser.observations[("job-1", "service")] = [
+        observation("service", "Y1", "12.5", "F17", label="Debt service")
+    ]
+    ranker = FakeRanker()
+    ranker.push("r0", {"r0": 0.97, "r1": 0.02}, sheets=0.90)
+    graph = _graph(parser, ScriptedModel(), ranker=ranker)
+    await _run(graph, "на каком листе Debt service")
+    snap = await graph.aget_state(run_config("thread-1"))
+    assert len(ranker.calls) == 1
+    assert ranker.calls[0]["ask_act"] is True
+    assert parser.observation_calls == []
+    assert "DEBT TIMELINE" in snap.values["draft"]
+    assert "Лист Debt." in snap.values["draft"]
+    assert "Cash Flow Available for Debt Service (CFADS)" in snap.values["draft"]
+    assert "12.5" not in snap.values["draft"]
 
 
 @pytest.mark.asyncio
@@ -2461,12 +2506,10 @@ async def test_debt_phrase_on_an_open_menu_reads_the_new_row() -> None:
         durability="sync",
     )
     snap = await graph.aget_state(run_config("thread-1"))
-    assert len(ranker.calls) == 2
-    second = list(ranker.calls[1]["criteria"].values())
-    assert any("BoP" in item for item in second)
-    assert any("EoP" in item for item in second)
+    assert ranker.calls == []
     assert snap.values["selected"][0]["row_key"] == "bop"
     assert _CACHED in snap.values["draft"]
+    assert "EoP" not in snap.values["draft"]
     assert "Какую строку взять?" not in snap.values["draft"]
 
 
@@ -2701,7 +2744,6 @@ async def test_open_book_asks_what_to_look_at() -> None:
     assert interrupts_of(label)
     assert label.values["user_question"] == "Назовите подпись."
     embedded = len(embedder.calls)
-    ranker.push("r0", {"r0": 0.9, "r1": 0.05}, sheets=0.10)
     await graph.ainvoke(
         Command(resume="CAPEX (including SPV costs)"),
         run_config("thread-goal"),
@@ -2712,7 +2754,7 @@ async def test_open_book_asks_what_to_look_at() -> None:
     assert cited.values["citations"][0]["value"] == "300000000"
     assert cited.values["citations"][0]["row_key"] == "exact"
     assert len(embedder.calls) == embedded
-    assert ranker.calls
+    assert ranker.calls == []
 
     _act(embedder, "greet")
     await graph.ainvoke(
@@ -2757,7 +2799,7 @@ async def test_open_book_asks_what_to_look_at() -> None:
     assert metric.values["citations"][0]["value"] == "88"
     assert metric.values["citations"][0]["period_id"] == "Y1"
     assert len(embedder.calls) == metric_embedded
-    assert len(ranker.calls) >= 2
+    assert len(ranker.calls) == 1
 
     _act(embedder, "files")
     await graph.ainvoke(

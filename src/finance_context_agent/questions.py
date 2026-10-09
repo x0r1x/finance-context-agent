@@ -297,6 +297,46 @@ def _choice_words(text: str, filenames: list[str]) -> list[str]:
     return words
 
 
+def named_label_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> list[dict[str, Any]] | None:
+    """Rows of the one label whose words are the whole reply.
+
+    Two labels with the same words stay out. A longer line that starts with
+    this label, or ends with it in parentheses, stays out too. An empty word
+    set is not a name.
+    """
+    words = set(_choice_words(text, list(filenames or [])))
+    if not words:
+        return None
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        label = str(row.get("label") or "").strip()
+        key = str(row.get("row_key") or "")
+        if not label or set(_choice_words(label, [])) != words:
+            continue
+        folded = label.casefold()
+        bucket = groups.get(folded)
+        if bucket is None:
+            order.append(folded)
+            bucket = []
+            groups[folded] = bucket
+        if key and any(str(item.get("row_key") or "") == key for item in bucket):
+            continue
+        bucket.append(row)
+    if len(order) != 1:
+        return None
+    needle = order[0]
+    for row in rows:
+        other = str(row.get("label") or "").strip()
+        if not other or other.casefold() == needle:
+            continue
+        if _keeps_longer(other, needle):
+            return None
+    return groups[needle]
+
+
 def choice_rows(
     text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
 ) -> list[dict[str, Any]]:
