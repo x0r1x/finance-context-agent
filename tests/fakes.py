@@ -348,6 +348,41 @@ class FakeRanker:
         )
 
 
+class FakeEmbed:
+    """Scripted act scores. An empty queue abstains so a forgotten push reaches chat."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self._queue: list[Any] = []
+
+    def push(self, scores: dict[str, float]) -> FakeEmbed:
+        self._queue.append(scores)
+        return self
+
+    def fail(self) -> FakeEmbed:
+        self._queue.append("boom")
+        return self
+
+    async def score(self, text: str) -> dict[str, float]:
+        self.calls.append(text)
+        if not self._queue:
+            return {
+                "files": 0.01,
+                "overview": 0.01,
+                "catalog": 0.01,
+                "figure": 0.01,
+                "greet": 0.01,
+                "explain": 0.01,
+                "unclear": 0.01,
+            }
+        item = self._queue.pop(0)
+        if item == "boom":
+            raise ModelError("embed")
+        if not isinstance(item, dict):
+            raise AssertionError(item)
+        return {str(key): float(value) for key, value in item.items()}
+
+
 class ScriptedModel:
     def __init__(self) -> None:
         self.queues: dict[str, list[Any]] = {"plan": [], "answer": []}

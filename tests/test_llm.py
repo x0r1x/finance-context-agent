@@ -97,6 +97,8 @@ async def test_chat_completions_body_uses_json_schema() -> None:
             content = '{"option":"1"}'
         elif role == "about":
             content = '{"acts":["chitchat"]}'
+        elif role == "talk":
+            content = '{"act":"catalog"}'
         else:
             content = '{"gaps":[]}'
         body = {"choices": [{"message": {"role": "assistant", "content": content}}]}
@@ -107,6 +109,7 @@ async def test_chat_completions_body_uses_json_schema() -> None:
     await chat.complete_json(role="answer", system="s", user="u")
     await chat.complete_json(role="choose", system="s", user="u", options=["1", "2"])
     await chat.complete_json(role="about", system="s", user="u")
+    await chat.complete_json(role="talk", system="s", user="u")
     await chat.aclose()
 
     assert [item["response_format"]["json_schema"]["name"] for item in seen] == [
@@ -114,6 +117,7 @@ async def test_chat_completions_body_uses_json_schema() -> None:
         "answer",
         "choose",
         "about",
+        "talk",
     ]
     for payload in seen:
         assert list(payload) == ["model", "temperature", "messages", "response_format"]
@@ -147,6 +151,19 @@ async def test_chat_completions_body_uses_json_schema() -> None:
     choose = seen[2]["response_format"]["json_schema"]["schema"]
     assert choose["properties"]["option"]["enum"] == ["none", "1", "2"]
     about = seen[3]["response_format"]["json_schema"]["schema"]
+    talk = seen[4]["response_format"]["json_schema"]["schema"]
+    assert set(talk["properties"]) == {"act"}
+    assert "sheet" not in talk["properties"]
+    assert "label" not in talk["properties"]
+    assert talk["properties"]["act"]["enum"] == [
+        "files",
+        "overview",
+        "catalog",
+        "figure",
+        "greet",
+        "explain",
+        "unclear",
+    ]
     assert set(about["properties"]) == {"acts"}
     assert about["properties"]["acts"]["items"]["enum"] == ["chitchat", "books", "book", "row"]
     assert about["additionalProperties"] is False

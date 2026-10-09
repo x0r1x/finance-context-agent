@@ -140,7 +140,27 @@ class About(BaseModel):
     acts: list[DialogAct]
 
 
-_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer, "about": About}
+class TalkAct(StrEnum):
+    files = "files"
+    overview = "overview"
+    catalog = "catalog"
+    figure = "figure"
+    greet = "greet"
+    explain = "explain"
+    unclear = "unclear"
+
+
+class Talk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    act: TalkAct
+
+
+_MODELS: dict[str, type[BaseModel]] = {
+    "plan": Plan,
+    "answer": Answer,
+    "about": About,
+    "talk": Talk,
+}
 _SCHEMA_DROP = {"title", "default", "$defs", "$schema", "$comment"}
 
 

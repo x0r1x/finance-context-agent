@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
 from finance_context_agent.api import router
+from finance_context_agent.clients.embed import EmbedClient
 from finance_context_agent.clients.llm import OpenAIChat
 from finance_context_agent.clients.lock import RedisThreadLock
 from finance_context_agent.clients.parser import ParserClient
@@ -37,12 +38,20 @@ async def lifespan(app: FastAPI):
         settings.ranker_model,
         timeout=settings.parser_timeout_sec,
     )
+    embedder = EmbedClient(
+        settings.resolved_llm_base_url(),
+        settings.llm_api_key,
+        settings.embed_model,
+        timeout=settings.llm_timeout_sec,
+    )
     redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     async with AsyncRedisSaver.from_conn_string(
         settings.redis_url, ttl=settings.saver_ttl()
     ) as checkpointer:
         await checkpointer.asetup()
-        app.state.graph = build_graph(parser, model, checkpointer, settings, ranker)
+        app.state.graph = build_graph(
+            parser, model, checkpointer, settings, ranker, embedder
+        )
         app.state.redis = redis
         app.state.lock = RedisThreadLock(redis, ttl_seconds=settings.lock_ttl_sec)
         app.state.parser = parser
@@ -53,6 +62,7 @@ async def lifespan(app: FastAPI):
             await parser.aclose()
             await model.aclose()
             await ranker.aclose()
+            await embedder.aclose()
             await redis.aclose()
 
 
@@ -87,6 +97,15 @@ def main() -> None:
         handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         ranker_log.addHandler(handler)
     ranker_log.propagate = False
+    embed_log = logging.getLogger("finance_context_agent.clients.embed")
+    graph_log = logging.getLogger("finance_context_agent.graph")
+    for item in (embed_log, graph_log):
+        item.setLevel(logging.INFO)
+        if not item.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+            item.addHandler(handler)
+        item.propagate = False
     uvicorn.run(
         "finance_context_agent.app:app",
         host=settings.host,

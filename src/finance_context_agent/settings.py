@@ -35,6 +35,7 @@ _BLANK_STRINGS = (
     "ranker_base_url",
     "ranker_api_key",
     "ranker_model",
+    "embed_model",
 )
 
 
@@ -117,6 +118,7 @@ class Settings(BaseSettings):
     ranker_base_url: str = "http://127.0.0.1:8700/v1/systemone"
     ranker_api_key: str = ""
     ranker_model: str = "clm-latest"
+    embed_model: str = "text-embedding-qwen3-embedding-4b"
 
     @field_validator(*_BLANK_STRINGS, mode="before")
     @classmethod

@@ -12,9 +12,11 @@ from finance_context_agent.clients.lock import MemoryThreadLock
 from finance_context_agent.clients.parser import ParserError
 from finance_context_agent.clients.ranker import Choice
 from finance_context_agent.graph import build_graph
+from finance_context_agent.questions import ACTS
 from finance_context_agent.session import derived_thread_id
 from finance_context_agent.turn import run_config
 from tests.fakes import (
+    FakeEmbed,
     FakeParser,
     FakeRanker,
     ScriptedModel,
@@ -35,8 +37,16 @@ def _ready(parser: FakeParser, needle: str = "DSCR", key: str = "row-dscr") -> N
     parser.observations[(JOB, key)] = [observation(key, "2030", "1.25", "C10", label=needle)]
 
 
-def _app(parser: FakeParser, model, ranker=None):
-    graph = build_graph(parser, model, InMemorySaver(), ranker=ranker or FakeRanker())
+def _act(embed: FakeEmbed, act: str) -> None:
+    scores = {name: 0.20 for name in ACTS}
+    scores[act] = 0.90
+    embed.push(scores)
+
+
+def _app(parser: FakeParser, model, ranker=None, embedder=None):
+    graph = build_graph(
+        parser, model, InMemorySaver(), ranker=ranker or FakeRanker(), embedder=embedder
+    )
     app = create_app(graph=graph, lock=MemoryThreadLock(), parser=parser, redis=None)
     return app, graph
 
@@ -71,8 +81,9 @@ async def test_stream_and_non_user_message_are_rejected() -> None:
     parser = FakeParser()
     parser.jobs = [{"job_id": JOB, "source_filename": "model.xlsx"}]
     model = ScriptedModel()
-    model.push("about", {"acts": ["row"]})
-    app, _graph = _app(parser, model)
+    embedder = FakeEmbed()
+    _act(embedder, "figure")
+    app, _graph = _app(parser, model, embedder=embedder)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         models = await client.get("/v1/models")
         streamed = await client.post(
@@ -116,9 +127,13 @@ async def test_missing_thread_id_is_minted() -> None:
     _ready(parser)
     model = ScriptedModel()
     ranker = FakeRanker()
+    embedder = FakeEmbed()
     question = "Какой DSCR в 2030?"
     ranker.push("r0", {"r0": 0.9, "books": 0.02, "book": 0.02, "intro": 0.02})
-    app, _graph = _app(parser, model, ranker)
+    _act(embedder, "greet")
+    _act(embedder, "figure")
+    _act(embedder, "greet")
+    app, _graph = _app(parser, model, ranker, embedder)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         response = await client.post(
             "/v1/chat/completions",
@@ -136,7 +151,6 @@ async def test_missing_thread_id_is_minted() -> None:
                 "user": "alice",
             },
         )
-        ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02, "none": 0.01})
         hello = "привет"
         opened_hello = await client.post(
             "/v1/chat/completions",
@@ -154,7 +168,6 @@ async def test_missing_thread_id_is_minted() -> None:
                 ],
             },
         )
-        ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02})
         fresh_hello = await client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": hello}]},
@@ -193,7 +206,10 @@ async def test_missing_job_asks_and_a_different_job_conflicts() -> None:
     _ready(parser)
     model = ScriptedModel()
     ranker = FakeRanker()
-    app, graph = _app(parser, model, ranker)
+    embedder = FakeEmbed()
+    _act(embedder, "figure")
+    _act(embedder, "figure")
+    app, graph = _app(parser, model, ranker, embedder)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         asked = await client.post(
             "/v1/chat/completions",
@@ -271,7 +287,7 @@ class GateRanker:
         del state, criteria, ask_act, ask_hold
         self.entered.set()
         await self.release.wait()
-        return Choice("intro", {"intro": 0.9, "books": 0.02, "book": 0.02})
+        return Choice("r0", {"r0": 0.9})
 
 
 @pytest.mark.asyncio
@@ -281,7 +297,9 @@ async def test_thread_busy_while_the_lock_is_held() -> None:
     ranker = GateRanker()
     app, _graph = _app(parser, ScriptedModel(), ranker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-        first = asyncio.create_task(client.post("/v1/chat/completions", json=_payload("Какой?")))
+        first = asyncio.create_task(
+            client.post("/v1/chat/completions", json=_payload("Какой DSCR?"))
+        )
         await ranker.entered.wait()
         second = await client.post("/v1/chat/completions", json=_payload("ещё"))
         assert second.status_code == 409
@@ -297,10 +315,11 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
     parser = FakeParser()
     _ready(parser)
     model = ScriptedModel()
-    ranker = FakeRanker()
-    ranker.fail()
-    ranker.push("intro", {"intro": 0.9, "books": 0.03, "book": 0.02})
-    app, graph = _app(parser, model, ranker)
+    embedder = FakeEmbed()
+    embedder.fail()
+    model.push("talk", "boom")
+    _act(embedder, "greet")
+    app, graph = _app(parser, model, embedder=embedder)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
         failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
         assert failed.status_code == 503
@@ -322,7 +341,7 @@ async def test_model_error_is_logged_and_hidden(caplog: pytest.LogCaptureFixture
     app, _graph = _app(parser, model, ranker)
     with caplog.at_level(logging.WARNING, logger="finance_context_agent.api"):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://agent") as client:
-            failed = await client.post("/v1/chat/completions", json=_payload("Какой?"))
+            failed = await client.post("/v1/chat/completions", json=_payload("Какой DSCR?"))
     assert failed.status_code == 503
     assert failed.json() == {"error": "upstream_unavailable"}
     assert "boom" in caplog.text

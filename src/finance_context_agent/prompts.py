@@ -75,6 +75,36 @@ def about_messages(question: str, filenames: list[str]) -> tuple[str, str]:
     return system, user
 
 
+def talk_messages(book: str, last_act: str, row_open: bool, reply: str) -> tuple[str, str]:
+    """One act. Examples only: a word in the reply does not force the act."""
+    system = (
+        "Верни один ход: files, overview, catalog, figure, greet, explain или unclear. "
+        "files — какие файлы или книги загружены. "
+        "overview — обзор книги целиком. "
+        "catalog — перечень строк, атрибутов или содержимое открытой книги. "
+        "figure — одно число или ряд одной метрики. "
+        "greet — приветствие, благодарность или вопрос, что умеет агент. "
+        "explain — как считается уже открытая строка. "
+        "unclear — бессмыслица. "
+        "Примеры: здравствуйте → greet. что ты умеешь → greet. спасибо большое → greet. "
+        "какие файлы есть → files. какие книги загружены → files. "
+        "какие данные у тебя есть → files. обзор модели → overview. сделай саммари → overview. "
+        "перечень показателей → catalog. какие строки есть в книге → catalog. "
+        "что на листе Debt → catalog. что внутри → catalog. "
+        "Какой IRR? → figure. как считается → explain. абвгд? → unclear."
+    )
+    user = json.dumps(
+        {
+            "book": book,
+            "last": last_act or "пусто",
+            "row_open": row_open,
+            "reply": reply,
+        },
+        ensure_ascii=False,
+    )
+    return system, user
+
+
 def without_account_code(value: Any) -> Any:
     """Drop the parser account code before it reaches a menu, a selection, or the model."""
     if isinstance(value, dict):

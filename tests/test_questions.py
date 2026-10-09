@@ -1,6 +1,16 @@
 """The closed set a choice is built from. No graph and no network."""
 
-from finance_context_agent.questions import choice_rows, inventory_rows, ranker_state
+from finance_context_agent.questions import (
+    ACT_FLOOR,
+    ACT_GAP,
+    ACTS,
+    catalog_reply,
+    choice_rows,
+    class_scores,
+    inventory_rows,
+    prototype_decision,
+    ranker_state,
+)
 from tests.fakes import catalog_row
 
 _FILE = "packt-project-finance.xlsx"
@@ -149,3 +159,66 @@ def test_ranker_state_names_the_book_only_when_no_row_is_offered() -> None:
     assert uttered == "Debt Outstanding BoP"
     empty = ranker_state(_FILE, "сделай саммари", False)
     assert empty.startswith(f"Книга {_FILE}.")
+
+
+def _capex_book() -> list[dict]:
+    return [
+        catalog_row(
+            "exact",
+            "CAPEX (including SPV costs)",
+            sheet="Input Assumptions",
+            label_path=["COSTS DURING CONSTRUCTION"],
+        ),
+        catalog_row("bare", "CAPEX", sheet="Construction"),
+        catalog_row(
+            "short",
+            "CAPEX (incl. SPV costs)",
+            sheet="Ratios",
+            label_path=["Project IRR"],
+        ),
+        catalog_row("ebitda", "EBITDA", sheet="P&L"),
+    ]
+
+
+def test_prototype_decision_needs_both_floors() -> None:
+    scores = {name: ACT_FLOOR - ACT_GAP for name in ACTS}
+    scores["catalog"] = ACT_FLOOR
+    decided = prototype_decision(scores)
+    assert decided is not None
+    act, top, gap = decided
+    assert act == "catalog"
+    assert top == ACT_FLOOR
+    assert abs(gap - ACT_GAP) < 1e-9
+    low = dict(scores)
+    low["catalog"] = ACT_FLOOR - 0.001
+    assert prototype_decision(low) is None
+    narrow = {name: ACT_FLOOR - ACT_GAP + 0.001 for name in ACTS}
+    narrow["catalog"] = ACT_FLOOR
+    assert prototype_decision(narrow) is None
+    assert prototype_decision({name: 0.01 for name in ACTS}) is None
+    assert prototype_decision(None) is None
+
+
+def test_max_keeps_a_matching_anchor_and_the_centroid_shrinks_it() -> None:
+    query = [1.0, 0.0]
+    anchors = {"catalog": [[1.0, 0.0], [0.0, 1.0]]}
+    assert class_scores(query, anchors, how="max")["catalog"] == 1.0
+    assert class_scores(query, anchors, how="centroid")["catalog"] < 1.0
+
+
+def test_catalog_reply_groups_sheets_and_can_keep_one() -> None:
+    rows = _capex_book()
+    full = catalog_reply(rows, "дай список атрибутов в этой книге")
+    assert full == (
+        "Лист Input Assumptions\n"
+        "CAPEX (including SPV costs). Раздел COSTS DURING CONSTRUCTION.\n"
+        "Лист Construction\n"
+        "CAPEX\n"
+        "Лист Ratios\n"
+        "CAPEX (incl. SPV costs). Раздел Project IRR.\n"
+        "Лист P&L\n"
+        "EBITDA"
+    )
+    construction = catalog_reply(rows, "что есть на листе Construction")
+    assert construction == "Лист Construction\nCAPEX"
+    assert "EBITDA" not in construction

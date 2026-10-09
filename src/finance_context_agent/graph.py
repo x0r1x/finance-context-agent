@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, TypedDict
 
@@ -25,21 +26,27 @@ from finance_context_agent.periods import periods_from_question, resolve_periods
 from finance_context_agent.prompts import (
     about_messages,
     answer_messages,
+    talk_messages,
     without_account_code,
 )
 from finance_context_agent.questions import (
+    ACTS,
     HOLD_FLOOR,
     LIST_FLOOR,
+    act_text,
     asks_how,
     book_overview,
     books_reply,
+    catalog_reply,
     chitchat_reply,
     choice_rows,
     decide_margin,
     file_segments,
     inventory_rows,
     name_tokens,
+    prototype_decision,
     ranker_state,
+    sole_period_key,
 )
 from finance_context_agent.settings import Settings
 
@@ -51,6 +58,10 @@ _ASK_BOOKS = "Спросить, какие книги есть."
 _ASK_BOOK = "Попросить обзор открытой книги."
 _ASK_INTRO = "Реплика про самого агента."
 _ASK_NONE = "Подходящей строки нет."
+_CLARIFY = "Уточните: файлы, обзор книги, перечень атрибутов или одну метрику."
+_EXPLAIN_ASK = "Назовите подпись, формулу которой объяснить."
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict, total=False):
@@ -93,6 +104,7 @@ class AgentState(TypedDict, total=False):
     schema_error: bool
     draft_from_cache: bool
     cache_missing: bool
+    last_act: str
 
 
 def build_graph(
@@ -101,6 +113,7 @@ def build_graph(
     checkpointer: Any,
     settings: Settings | None = None,
     ranker: Any = None,
+    embedder: Any = None,
 ) -> Any:
     settings = settings or Settings()
     label_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -138,7 +151,7 @@ def build_graph(
         if state.get("content_steps", 0) >= settings.content_budget:
             return _done(state.get("draft") or "", list(state.get("gaps") or ["budget"]))
         if not state.get("job_id"):
-            return await _book_or_agent(state, model, parser, ranker)
+            return await _book_or_agent(state, model, parser, embedder, settings)
         question = str(state.get("question") or "")
         axes = list(state.get("axes") or [])
         reply = str(state.get("human_reply") or "").strip()
@@ -160,6 +173,10 @@ def build_graph(
         filename = str((state.get("summary") or {}).get("source_filename") or "").strip()
         filenames = [filename] if filename else []
         pool = choice_rows(text, found, filenames)
+        if not pool:
+            return await _move(
+                state, text, found, filenames, parser, model, embedder, settings
+            )
         return await _rank_labels(
             state, text, pool, found, filenames, ranker, parser, settings
         )
@@ -811,9 +828,13 @@ async def _dialog_turn(
 
 
 async def _book_or_agent(
-    state: dict[str, Any], model: JsonModel, parser: ParserClient, ranker: Any
+    state: dict[str, Any],
+    model: JsonModel,
+    parser: ParserClient,
+    embedder: Any,
+    settings: Settings,
 ) -> dict[str, Any]:
-    """No book is bound. One filename loads that book. Otherwise one dialog choice."""
+    """No book is bound. One filename loads that book. Otherwise the act classifier."""
     question = str(state.get("question") or "")
     jobs = await _succeeded_jobs(parser)
     if isinstance(jobs, dict):
@@ -823,7 +844,7 @@ async def _book_or_agent(
         return _job_pause(jobs)
     if len(named) == 1:
         return await _named_file_turn(question, state, model, parser, named[0], jobs)
-    return await _dialog_choice(question, jobs, ranker)
+    return await _move(state, question, [], [], parser, model, embedder, settings, jobs)
 
 
 async def _dialog_choice(
@@ -1187,6 +1208,7 @@ def _sheet_list(
         "search_again": False,
         "just_bound_row": False,
         "just_bound_job": False,
+        "last_act": "catalog",
     }
 
 
@@ -1218,7 +1240,7 @@ async def _rank_labels(
         key = str(decision.get("key") or "")
         named = _named_periods(state, text)
         if key in by_key:
-            return _select_ready(state, [by_key[key]], named, settings)
+            return _select_ready(state, [by_key[key]], named, settings) | {"last_act": "figure"}
         if key == "books":
             return await _books_answer(parser)
         if key == "book":
@@ -1241,6 +1263,206 @@ async def _rank_labels(
         "draft_from_cache": False,
         "cache_missing": False,
     }
+
+
+def _unique_leader(scores: dict[str, float] | None) -> str | None:
+    """The single highest act, even under the floor. A tie has no leader."""
+    if not scores:
+        return None
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    act, top = ordered[0]
+    if act not in ACTS:
+        return None
+    if len(ordered) > 1 and abs(top - ordered[1][1]) < 1e-9:
+        return None
+    return str(act)
+
+
+def _finished(draft: str, act: str, job_id: str) -> dict[str, Any]:
+    """A printed act. The menu is closed and the next turn is classified again."""
+    body: dict[str, Any] = {
+        "draft": draft,
+        "gaps": [],
+        "satisfactory": True,
+        "citations": [],
+        "terminal": "done",
+        "awaiting": "",
+        "offers": [],
+        "pending": "",
+        "user_question": "",
+        "menu_question": "",
+        "selected": [],
+        "period_ids": [],
+        "human_reply": "",
+        "label_reply": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "search_again": False,
+        "just_bound_row": False,
+        "just_bound_job": False,
+        "last_act": act,
+    }
+    if job_id:
+        body["job_id"] = job_id
+    return body
+
+
+def _missing(state: dict[str, Any], settings: Settings, act: str) -> dict[str, Any]:
+    return _ask(state, _MISSING_ROW, settings=settings) | {
+        "label_reply": True,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "last_act": act,
+    }
+
+
+def _clarify(
+    state: dict[str, Any], settings: Settings, text: str = _CLARIFY
+) -> dict[str, Any]:
+    return _ask(state, text, settings=settings) | {
+        "label_reply": True,
+        "draft_from_cache": False,
+        "cache_missing": False,
+        "last_act": "unclear",
+    }
+
+
+async def _need_book(
+    parser: ParserClient, jobs: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Ask which file to open. The carried question is classified again inside it."""
+    if jobs is None:
+        loaded = await _succeeded_jobs(parser)
+        if isinstance(loaded, dict):
+            return loaded
+        jobs = loaded
+    if not jobs:
+        return _done("Готовых книг нет.", ["no_jobs"])
+    return _job_pause(jobs) | {"last_act": ""}
+
+
+async def _emit(
+    act: str,
+    state: dict[str, Any],
+    text: str,
+    rows: list[dict[str, Any]],
+    parser: ParserClient,
+    settings: Settings,
+    jobs: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Print the act the classifier or the chat already chose. No stem can replace it."""
+    job_id = str(state.get("job_id") or "")
+    held = [row for row in (state.get("selected") or []) if isinstance(row, dict)]
+    if act == "files":
+        return await _books_answer(parser, jobs) | {"last_act": "files"}
+    if act == "overview":
+        if job_id:
+            return await _overview_of(parser, job_id) | {"last_act": "overview"}
+        return await _need_book(parser, jobs)
+    if act == "catalog":
+        if not job_id:
+            return await _need_book(parser, jobs)
+        draft = catalog_reply(rows, text)
+        if not draft:
+            return _missing(state, settings, "catalog")
+        return _finished(draft, "catalog", job_id)
+    if act == "figure":
+        if job_id:
+            return _missing(state, settings, "figure")
+        return await _need_book(parser, jobs)
+    if act == "explain":
+        if held and job_id:
+            continued = _continue_selected(state, held, [], text, settings)
+            if "plan" in continued:
+                body = dict(continued["plan"])
+                body["question_type"] = "explain"
+                body["trace"] = "precedents"
+                return continued | {"plan": body, "last_act": "explain"}
+            return continued
+        if job_id:
+            return _ask(state, _EXPLAIN_ASK, settings=settings) | {
+                "label_reply": True,
+                "draft_from_cache": False,
+                "cache_missing": False,
+                "last_act": "explain",
+            }
+        return await _need_book(parser, jobs)
+    if act == "greet":
+        if job_id:
+            return _agent_reply() | {"last_act": "greet"}
+        if jobs is None:
+            loaded = await _succeeded_jobs(parser)
+            if isinstance(loaded, dict):
+                return loaded
+            jobs = loaded
+        if jobs:
+            return _job_pause(jobs) | {"last_act": ""}
+        return _agent_reply() | {"last_act": "greet"}
+    return _clarify(state, settings)
+
+
+async def _move(
+    state: dict[str, Any],
+    text: str,
+    catalog_rows: list[dict[str, Any]],
+    filenames: list[str],
+    parser: ParserClient,
+    model: JsonModel,
+    embedder: Any,
+    settings: Settings,
+    jobs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """No pooled label. A period fills the open row; otherwise the embedding chooses the act."""
+    held = [row for row in (state.get("selected") or []) if isinstance(row, dict)]
+    period = sole_period_key(text, filenames, list(state.get("axes") or []), held)
+    if period:
+        continued = _continue_selected(
+            state, held, [{"period_key": period}], text, settings
+        )
+        if "plan" in continued:
+            return continued | {"last_act": "figure"}
+        return continued
+    book_open = bool(state.get("job_id"))
+    rendered = act_text(
+        "открыта" if book_open else "закрыта",
+        str(state.get("last_act") or "") or "пусто",
+        "открыта" if held else "нет",
+        text,
+    )
+    scores: dict[str, float] | None = None
+    if embedder is not None:
+        try:
+            scores = await embedder.score(rendered)
+        except ModelError:
+            scores = None
+    decided = prototype_decision(scores)
+    if decided is not None:
+        act, top, gap = decided
+        logger.info("embed %s %.3f %.3f", act, top, gap)
+        return await _emit(act, state, text, catalog_rows, parser, settings, jobs)
+    if scores:
+        ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        top = ordered[0][1]
+        second = ordered[1][1] if len(ordered) > 1 else 0.0
+        logger.info("embed abstain %.3f %.3f", top, top - second)
+    else:
+        logger.info("embed abstain")
+    system, user = talk_messages(
+        "открыта" if book_open else "закрыта",
+        str(state.get("last_act") or ""),
+        bool(held),
+        text,
+    )
+    try:
+        parsed = await model.complete_json(role="talk", system=system, user=user)
+    except SchemaError:
+        return _clarify(state, settings)
+    act = str(parsed.get("act") or "")
+    leader = _unique_leader(scores)
+    if act not in ACTS or (leader is not None and act != leader):
+        return _clarify(state, settings)
+    logger.info("talk %s", act)
+    return await _emit(act, state, text, catalog_rows, parser, settings, jobs)
 
 
 async def _choose_offer(state: dict[str, Any], settings: Settings) -> dict[str, Any]:
