@@ -48,13 +48,14 @@ def ensure_same_job(snapshot: Any, job_id: str | None) -> None:
 def decide_input(snapshot: Any, text: str, job_id: str | None) -> Any:
     """Resume a pause, continue a crashed run, or start a turn.
 
-    A crashed run (`next` set, no interrupt) is continued with ``None``.
-    The new text is not treated as a new question.
+    A pause on ``ask_user`` resumes with the reply even when the interrupt
+    list is empty. Any other pending node is continued with ``None``.
     """
     ensure_same_job(snapshot, job_id)
-    if interrupts_of(snapshot):
+    nodes = next_nodes(snapshot)
+    if interrupts_of(snapshot) or "ask_user" in nodes:
         return Command(resume=text)
-    if next_nodes(snapshot):
+    if nodes:
         return None
     return new_turn_input(text, job_id)
 

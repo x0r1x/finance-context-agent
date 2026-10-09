@@ -364,28 +364,17 @@ def _citation_note(got: list[tuple[str, str]], target: tuple[str, str]) -> str:
 
 
 def _mask_menu_labels(content: str) -> str:
-    """Drop menu labels. A digit inside ``last 12 months`` is not a cell value."""
+    """Drop menu choices. A digit inside ``last 12 months`` is not a cell value."""
+    if "Какую строку взять?" not in content:
+        return content
     lines: list[str] = []
     for line in content.splitlines():
-        marker = "»: "
-        if marker not in line:
-            lines.append(line)
+        stripped = line.strip()
+        if re.match(r"^\d+\. ", stripped) or re.match(r"^№\d+", stripped):
             continue
-        head, tail = line.split(marker, 1)
-        dot = tail.find(".")
-        if dot < 0:
-            lines.append(line)
+        if stripped.startswith(("Лист ", "Раздел ", "Это ")):
             continue
-        kept: list[str] = []
-        for part in tail[dot + 1 :].split("; "):
-            bracket = part.rfind("]")
-            if bracket == -1:
-                kept.append(part)
-                continue
-            rest = part[bracket + 1 :]
-            if rest.strip():
-                kept.append(rest)
-        lines.append(f"{head}{marker}{tail[: dot + 1]}{''.join(kept)}")
+        lines.append(line)
     return "\n".join(lines)
 
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from finance_context_agent.llm import ModelError, SchemaError
-from finance_context_agent.parser import ParserError
+from finance_context_agent.clients.llm import ModelError, SchemaError
+from finance_context_agent.clients.parser import ParserError
+from finance_context_agent.clients.ranker import Choice
 
 
 def catalog_row(
@@ -162,6 +163,7 @@ def two_first_years() -> list[dict[str, Any]]:
 class FakeParser:
     def __init__(self) -> None:
         self.jobs: list[dict[str, Any]] = []
+        self.list_calls: list[dict[str, Any]] = []
         self.summary: dict[str, Any] = {"marker": "passport", "coverage": {"mapped": 1}}
         self.axes: list[dict[str, Any]] = []
         self.book_etag = "etag-1"
@@ -171,6 +173,8 @@ class FakeParser:
         self.traces: dict[tuple[str, str], dict[str, Any]] = {}
         self.observation_calls: list[dict[str, Any]] = []
         self.catalog_calls: list[dict[str, Any]] = []
+        self.rows: dict[str, list[dict[str, Any]]] = {}
+        self.list_row_calls: list[str] = []
         self.head_calls: list[str] = []
         self.head_etag: str | None = None
         self.context: dict[str, Any] | None = None
@@ -183,6 +187,7 @@ class FakeParser:
         self, *, status: str | None = None, q: str | None = None
     ) -> list[dict[str, Any]]:
         self._raise()
+        self.list_calls.append({"status": status, "q": q})
         return list(self.jobs)
 
     async def get_summary(self, job_id: str) -> tuple[dict[str, Any], str]:
@@ -210,6 +215,24 @@ class FakeParser:
             "axes": self.axes,
             "rows": [{"row_key": "DISCARD_ROW", "label": "discard"}],
         }, self.book_etag
+
+    async def list_rows(self, job_id: str) -> list[dict[str, Any]]:
+        self._raise()
+        self.list_row_calls.append(job_id)
+        if job_id in self.rows:
+            return [dict(row) for row in self.rows[job_id]]
+        seen: set[str] = set()
+        ordered: list[dict[str, Any]] = []
+        for (found_id, _query), page in self.pages.items():
+            if found_id != job_id:
+                continue
+            for row in page.get("rows") or []:
+                key = str(row.get("row_key"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(row)
+        return ordered
 
     async def search_rows(self, job_id: str, q: str, *, limit: int = 8) -> dict[str, Any]:
         self._raise()
@@ -269,6 +292,97 @@ class FakeParser:
             raise self.error
 
 
+class FakeRanker:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._queue: list[Any] = []
+
+    def push(
+        self,
+        key: str,
+        probabilities: dict[str, float],
+        sheets: float = 0.0,
+        hold: float = 0.0,
+    ) -> FakeRanker:
+        self._queue.append((key, probabilities, sheets, hold))
+        return self
+
+    def fail(self) -> FakeRanker:
+        self._queue.append("boom")
+        return self
+
+    async def choose(
+        self,
+        state: str,
+        criteria: dict[str, str],
+        *,
+        ask_act: bool = False,
+        ask_hold: bool = False,
+    ) -> Choice:
+        self.calls.append(
+            {
+                "state": state,
+                "criteria": dict(criteria),
+                "ask_act": ask_act,
+                "ask_hold": ask_hold,
+            }
+        )
+        if not self._queue:
+            probs = {name: 0.01 for name in criteria}
+            first = next(iter(criteria), "intro")
+            return Choice(
+                first,
+                probs,
+                sheets=0.0 if ask_act else None,
+                hold=0.0 if ask_hold else None,
+            )
+        item = self._queue.pop(0)
+        if item == "boom":
+            raise ModelError("boom")
+        key, probabilities, sheets, hold = item
+        return Choice(
+            key,
+            probabilities,
+            sheets=sheets if ask_act else None,
+            hold=hold if ask_hold else None,
+        )
+
+
+class FakeEmbed:
+    """Scripted act scores. An empty queue abstains so a forgotten push reaches chat."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self._queue: list[Any] = []
+
+    def push(self, scores: dict[str, float]) -> FakeEmbed:
+        self._queue.append(scores)
+        return self
+
+    def fail(self) -> FakeEmbed:
+        self._queue.append("boom")
+        return self
+
+    async def score(self, text: str) -> dict[str, float]:
+        self.calls.append(text)
+        if not self._queue:
+            return {
+                "files": 0.01,
+                "overview": 0.01,
+                "catalog": 0.01,
+                "figure": 0.01,
+                "greet": 0.01,
+                "explain": 0.01,
+                "unclear": 0.01,
+            }
+        item = self._queue.pop(0)
+        if item == "boom":
+            raise ModelError("embed")
+        if not isinstance(item, dict):
+            raise AssertionError(item)
+        return {str(key): float(value) for key, value in item.items()}
+
+
 class ScriptedModel:
     def __init__(self) -> None:
         self.queues: dict[str, list[Any]] = {"plan": [], "answer": []}
@@ -278,10 +392,26 @@ class ScriptedModel:
         self.queues.setdefault(role, []).append(payload)
         return self
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
-        self.seen.append({"role": role, "system": system, "user": user})
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.seen.append(
+            {
+                "role": role,
+                "system": system,
+                "user": user,
+                "options": "" if options is None else json.dumps(options, ensure_ascii=False),
+            }
+        )
         queue = self.queues.setdefault(role, [])
         if not queue:
+            if role == "view":
+                return {"view": "sentence"}
             raise AssertionError(f"no script for {role}")
         item = queue.pop(0)
         if item == "bad":
@@ -299,8 +429,24 @@ class ByQuestion:
     def __init__(self) -> None:
         self.seen: list[dict[str, str]] = []
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
-        self.seen.append({"role": role, "system": system, "user": user})
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.seen.append(
+            {
+                "role": role,
+                "system": system,
+                "user": user,
+                "options": "" if options is None else json.dumps(options, ensure_ascii=False),
+            }
+        )
+        if role == "view":
+            return {"view": "sentence"}
         data = json.loads(user)
         question = str(data.get("question") or "")
         if "ALPHA" in question:

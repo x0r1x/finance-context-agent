@@ -26,7 +26,17 @@ _BLANK_INTS = (
 )
 _BLANK_FLOATS = ("parser_timeout_sec", "llm_timeout_sec", "llm_temperature")
 _BLANK_BOOLS = ("checkpoint_refresh_on_read", "langgraph_strict_msgpack")
-_BLANK_STRINGS = ("redis_url", "parser_base_url", "llm_base_url", "llm_model", "host")
+_BLANK_STRINGS = (
+    "redis_url",
+    "parser_base_url",
+    "llm_base_url",
+    "llm_model",
+    "host",
+    "ranker_base_url",
+    "ranker_api_key",
+    "ranker_model",
+    "embed_model",
+)
 
 
 def _blank(value: object) -> bool:
@@ -105,6 +115,10 @@ class Settings(BaseSettings):
     max_dependent_rows: int = Field(default=4, ge=1, le=8)
     dependent_observation_limit: int = Field(default=8, ge=1, le=48)
     langgraph_strict_msgpack: bool = True
+    ranker_base_url: str = "http://127.0.0.1:8700/v1/systemone"
+    ranker_api_key: str = ""
+    ranker_model: str = "clm-latest"
+    embed_model: str = "text-embedding-qwen3-embedding-4b"
 
     @field_validator(*_BLANK_STRINGS, mode="before")
     @classmethod
@@ -134,6 +148,10 @@ class Settings(BaseSettings):
     def resolved_parser_base_url(self) -> str:
         rewrite = "host.docker.internal" if Path("/.dockerenv").exists() else None
         return rewrite_loopback_host(self.parser_base_url, rewrite_loopback_to=rewrite)
+
+    def resolved_ranker_base_url(self) -> str:
+        rewrite = "host.docker.internal" if Path("/.dockerenv").exists() else None
+        return rewrite_loopback_host(self.ranker_base_url, rewrite_loopback_to=rewrite)
 
     def saver_ttl(self) -> dict[str, Any]:
         return {

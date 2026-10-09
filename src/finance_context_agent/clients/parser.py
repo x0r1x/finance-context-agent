@@ -11,7 +11,11 @@ from urllib.parse import urlencode
 
 import httpx
 
+from finance_context_agent.catalog import compact_row
 from finance_context_agent.settings import field_default
+
+_CATALOG_PAGE = 1000
+_CATALOG_PAGES = 50
 
 
 class ParserError(Exception):
@@ -95,6 +99,37 @@ class ParserClient:
             [("q", q), ("limit", str(limit))],
         )
         return body
+
+    async def list_rows(self, job_id: str) -> list[dict[str, Any]]:
+        """Every catalog row of one book, without values and without concept_id."""
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        for _page in range(_CATALOG_PAGES):
+            body, _etag = await self._get(
+                f"/v1/context-jobs/{job_id}/catalog",
+                [("limit", str(_CATALOG_PAGE)), ("offset", str(offset))],
+            )
+            if not isinstance(body, dict):
+                raise ParserError(502, "bad_catalog")
+            page = body.get("rows")
+            if not isinstance(page, list):
+                raise ParserError(502, "bad_catalog")
+            for row in page:
+                if not isinstance(row, dict):
+                    continue
+                label = str(row.get("label") or "").strip()
+                if not label:
+                    continue
+                compact = compact_row(row)
+                compact.pop("concept_id", None)
+                rows.append(compact)
+            total = body.get("total")
+            offset += len(page)
+            if not page or len(page) < _CATALOG_PAGE:
+                return rows
+            if isinstance(total, int) and not isinstance(total, bool) and offset >= total:
+                return rows
+        raise ParserError(502, "bad_catalog")
 
     async def get_observations(
         self,

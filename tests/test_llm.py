@@ -3,12 +3,14 @@ import json
 import httpx
 import pytest
 
-from finance_context_agent.llm import (
+from finance_context_agent.clients.llm import (
+    _MODELS,
     ModelError,
     OpenAIChat,
     Plan,
     SchemaError,
     chat_completions_url,
+    response_format_for,
 )
 
 
@@ -93,6 +95,12 @@ async def test_chat_completions_body_uses_json_schema() -> None:
             )
         elif role == "answer":
             content = '{"text":"0","citations":[]}'
+        elif role == "choose":
+            content = '{"option":"1"}'
+        elif role == "about":
+            content = '{"acts":["chitchat"]}'
+        elif role == "talk":
+            content = '{"act":"catalog"}'
         else:
             content = '{"gaps":[]}'
         body = {"choices": [{"message": {"role": "assistant", "content": content}}]}
@@ -101,11 +109,17 @@ async def test_chat_completions_body_uses_json_schema() -> None:
     chat = _chat(handler)
     await chat.complete_json(role="plan", system="s", user="u")
     await chat.complete_json(role="answer", system="s", user="u")
+    await chat.complete_json(role="choose", system="s", user="u", options=["1", "2"])
+    await chat.complete_json(role="about", system="s", user="u")
+    await chat.complete_json(role="talk", system="s", user="u")
     await chat.aclose()
 
     assert [item["response_format"]["json_schema"]["name"] for item in seen] == [
         "plan",
         "answer",
+        "choose",
+        "about",
+        "talk",
     ]
     for payload in seen:
         assert list(payload) == ["model", "temperature", "messages", "response_format"]
@@ -136,6 +150,38 @@ async def test_chat_completions_body_uses_json_schema() -> None:
         "text",
         "citations",
     }
+    choose = seen[2]["response_format"]["json_schema"]["schema"]
+    assert choose["properties"]["option"]["enum"] == ["none", "1", "2"]
+    about = seen[3]["response_format"]["json_schema"]["schema"]
+    talk = seen[4]["response_format"]["json_schema"]["schema"]
+    assert set(talk["properties"]) == {"act"}
+    assert "sheet" not in talk["properties"]
+    assert "label" not in talk["properties"]
+    assert talk["properties"]["act"]["enum"] == [
+        "files",
+        "overview",
+        "catalog",
+        "figure",
+        "greet",
+        "explain",
+        "unclear",
+    ]
+    assert set(about["properties"]) == {"acts"}
+    assert about["properties"]["acts"]["items"]["enum"] == ["chitchat", "books", "book", "row"]
+    assert about["additionalProperties"] is False
+    assert about["required"] == ["acts"]
+    refused = {"n": 0}
+
+    def reject(request: httpx.Request) -> httpx.Response:
+        refused["n"] += 1
+        body = {"choices": [{"message": {"content": '{"option":"9"}'}}]}
+        return httpx.Response(200, json=body)
+
+    closed = _chat(reject)
+    with pytest.raises(SchemaError):
+        await closed.complete_json(role="choose", system="s", user="u", options=["1", "2"])
+    assert refused["n"] == 2
+    await closed.aclose()
 
 
 def _assert_strict_schema(node: object) -> None:
@@ -154,6 +200,51 @@ def _assert_strict_schema(node: object) -> None:
     elif isinstance(node, list):
         for item in node:
             _assert_strict_schema(item)
+
+
+@pytest.mark.asyncio
+async def test_view_schema_is_the_orientations_of_this_frame() -> None:
+    assert "view" not in _MODELS
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        body = {"choices": [{"message": {"content": '{"view":"table-period"}'}}]}
+        return httpx.Response(200, json=body)
+
+    chat = _chat(handler)
+    parsed = await chat.complete_json(
+        role="view",
+        system="s",
+        user="u",
+        options=["sentence", "table-period"],
+    )
+    await chat.aclose()
+    assert parsed == {"view": "table-period"}
+    schema = seen[0]["response_format"]["json_schema"]["schema"]
+    assert schema == response_format_for("view", ["sentence", "table-period"])["json_schema"][
+        "schema"
+    ]
+    assert schema["properties"]["view"]["enum"] == ["sentence", "table-period"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["view"]
+    calls = {"n": 0}
+
+    def reject(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = {"choices": [{"message": {"content": '{"view":"table-label","index":0}'}}]}
+        return httpx.Response(200, json=body)
+
+    closed = _chat(reject)
+    with pytest.raises(SchemaError):
+        await closed.complete_json(
+            role="view",
+            system="s",
+            user="u",
+            options=["sentence", "table-period"],
+        )
+    assert calls["n"] == 2
+    await closed.aclose()
 
 
 def test_blank_period_is_absent_and_a_partial_one_stays() -> None:

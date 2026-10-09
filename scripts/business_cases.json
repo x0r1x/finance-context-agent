@@ -297,11 +297,10 @@
       "group": "menu",
       "question": "Какой EBITDA в 2030?",
       "expect": {
-        "outcome": "ask",
-        "menu_contains": [
-          "Operating Income or Loss (EBITDA)",
-          "EBITDA [PF Model"
-        ]
+        "outcome": "citation",
+        "row_key": "PF Model|262|PF Model!r185",
+        "period_id": "2030",
+        "value_status": "cached"
       }
     },
     {

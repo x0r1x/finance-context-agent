@@ -104,22 +104,16 @@ def _numbers(
 ) -> None:
     allowed: set[str] = set()
     for citation, observation in matched:
-        for raw in (
-            citation.get("value"),
-            citation.get("normalized_value"),
-            citation.get("period_id"),
-        ):
-            _allow(allowed, raw)
+        _allow(allowed, citation.get("value"))
+        _allow(allowed, citation.get("normalized_value"))
+        _allow_period(allowed, citation.get("period_id"))
         formula_text, precedents = _formula_parts(observation)
         for token in NUMBER.findall(formula_text):
             _allow(allowed, token)
         for precedent in precedents:
-            for raw in (
-                precedent.get("value"),
-                precedent.get("normalized_value"),
-                precedent.get("period_id"),
-            ):
-                _allow(allowed, raw)
+            _allow(allowed, precedent.get("value"))
+            _allow(allowed, precedent.get("normalized_value"))
+            _allow_period(allowed, precedent.get("period_id"))
     for token in NUMBER.findall(text):
         normalized = fold_decimal(token)
         if normalized is not None and normalized in allowed:
@@ -229,6 +223,14 @@ def _allow(allowed: set[str], raw: Any) -> None:
         allowed.add(normalized)
     if isinstance(raw, str) and raw.strip():
         allowed.add(raw.strip())
+
+
+def _allow_period(allowed: set[str], raw: Any) -> None:
+    """A period id may contain a digit, as in scenario-4. That digit is cited."""
+    _allow(allowed, raw)
+    if isinstance(raw, str):
+        for token in NUMBER.findall(raw):
+            _allow(allowed, token)
 
 
 def _wants_precedent(question: str, question_type: str, trace: str) -> bool:

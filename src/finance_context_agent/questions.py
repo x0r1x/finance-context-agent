@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import Decimal
 from typing import Any
 
+from finance_context_agent.catalog import _heading, _keeps_longer
 from finance_context_agent.text_numbers import display_cached, fold_decimal, scale_display
 
 _MENTION_STOP = frozenset(
@@ -89,6 +91,141 @@ def question_mention(question: str, axes: list[dict[str, Any]]) -> str:
     return " ".join(tokens)
 
 
+PICK_FLOOR = 0.55
+PICK_GAP = 0.15
+MENU_FLOOR = 0.25
+SHORTLIST_CAP = 24
+MENU_CAP = 8
+# Measured 2026-10-08: a bare label scores sheets 0.709, "есть ли еще CAPEX" scores 0.771.
+LIST_FLOOR = 0.75
+INVENTORY_CAP = 24
+# Measured 2026-10-09: "Привет" inside an open book scores hold 0.846.
+# "Спасибо" scores 0.689. "Какой DSCR?" scores cell 0.734.
+HOLD_FLOOR = 0.80
+# Measured 2026-10-09 on text-embedding-qwen3-embedding-4b, shared instruction,
+# score = max cosine to an anchor. Lowest required gap was 0.028 ("Какой DSCR?").
+# "список метрик" stayed at 0.007 and is left for the chat tail.
+ACT_FLOOR = 0.85
+ACT_GAP = 0.02
+CATALOG_CAP = 200
+ACTS = ("files", "overview", "catalog", "figure", "greet", "explain", "unclear")
+_ACT_PREFIX = "Instruct: Classify the user turn into a dialogue act\nQuery: "
+
+_WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
+
+
+def _bounded(haystack: str, needle: str) -> bool:
+    """True when needle sits in haystack with a non-letter on each side."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        found = haystack.find(needle, start)
+        if found < 0:
+            return False
+        end = found + len(needle)
+        before = found == 0 or not haystack[found - 1].isalnum()
+        after = end == len(haystack) or not haystack[end].isalnum()
+        if before and after:
+            return True
+        start = found + 1
+
+
+def contained_labels(text: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows whose label is a bounded piece of the reply.
+
+    A shorter label is dropped when a longer matched label contains it.
+    """
+    folded = text.casefold()
+    matched: list[dict[str, Any]] = []
+    folded_labels: list[str] = []
+    for row in rows:
+        label = str(row.get("label") or "").strip().casefold()
+        if not label or not _bounded(folded, label):
+            continue
+        matched.append(row)
+        folded_labels.append(label)
+    dropped: set[int] = set()
+    for index, label in enumerate(folded_labels):
+        for other_index, other in enumerate(folded_labels):
+            if other_index == index or len(other) <= len(label):
+                continue
+            if _bounded(other, label):
+                dropped.add(index)
+                break
+    return [row for index, row in enumerate(matched) if index not in dropped]
+
+
+def same_line(hits: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A single contained label also offers the longer line that continues it.
+
+    Two different labels in one reply stay as they are. A longer label is the
+    same line when it starts with the short one or ends with it in parentheses.
+    """
+    labels: list[str] = []
+    for row in hits:
+        label = str(row.get("label") or "").strip().casefold()
+        if label and label not in labels:
+            labels.append(label)
+    if len(labels) != 1:
+        return hits
+    needle = labels[0]
+    widened: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        other = str(row.get("label") or "").strip()
+        key = str(row.get("row_key") or "")
+        if not other or not key or key in seen:
+            continue
+        if other.casefold() == needle or _keeps_longer(other, needle):
+            seen.add(key)
+            widened.append(row)
+    return widened or hits
+
+
+def shortlist_rows(
+    text: str, rows: list[dict[str, Any]], cap: int = SHORTLIST_CAP
+) -> list[dict[str, Any]]:
+    """Rows whose label contains a word of the reply. Highest overlap first."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in _WORD.findall(text.casefold()):
+        if len(word) < 3 or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        label = str(row.get("label") or "").casefold()
+        hits = sum(1 for word in words if _bounded(label, word))
+        if hits:
+            scored.append((hits, -index, row))
+    scored.sort(reverse=True)
+    return [row for _hits, _index, row in scored[:cap]]
+
+
+def decide_margin(
+    probabilities: dict[str, float],
+    keys: set[str],
+    *,
+    menu_open: bool,
+) -> dict[str, Any]:
+    """Take a winner, keep an open menu, or offer the rows that cleared the floor."""
+    if not probabilities:
+        return {"act": "again"} if menu_open else {"act": "miss"}
+    ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+    winner, best = ordered[0]
+    second = ordered[1][1] if len(ordered) > 1 else 0.0
+    if best >= PICK_FLOOR and best - second >= PICK_GAP:
+        return {"act": "take", "key": str(winner)}
+    if menu_open:
+        return {"act": "again"}
+    ranked = [str(key) for key, score in ordered if key in keys and score >= MENU_FLOOR]
+    if ranked:
+        return {"act": "menu", "keys": ranked[:MENU_CAP]}
+    return {"act": "miss"}
+
+
 def asks_how(question: str) -> bool:
     """True when the sentence asks how a row is calculated. The row name stays outside."""
     folded = question.casefold()
@@ -105,6 +242,198 @@ def question_needles(question: str, axes: list[dict[str, Any]]) -> list[str]:
         if mention:
             needles.append(mention)
     return needles
+
+
+_FILE_EXTENSIONS = frozenset({"xlsx", "xlsm"})
+_NAME_SPLIT = re.compile(r"[^0-9A-Za-zА-Яа-яЁё]+")
+
+
+def name_tokens(text: str) -> list[str]:
+    """Pieces of a filename or a reply, split on everything that is not a letter or digit."""
+    return [part for part in _NAME_SPLIT.split(text.casefold()) if part]
+
+
+def file_segments(name: str) -> list[str]:
+    """Stem pieces of a workbook name. The extension is not a name."""
+    return [part for part in name_tokens(name) if part not in _FILE_EXTENSIONS]
+
+
+def remainder_needles(
+    question: str, names: list[str], axes: list[dict[str, Any]]
+) -> list[str]:
+    """Needles left after the named workbook is removed."""
+    return question_needles(_without_filenames(question, names), axes)
+
+
+def _without_filenames(text: str, filenames: list[str]) -> str:
+    """Drop a workbook name and its stem words before any other word count."""
+    cleaned = text
+    segments: list[str] = []
+    for name in filenames:
+        piece = name.strip()
+        if not piece:
+            continue
+        cleaned = re.sub(re.escape(piece), " ", cleaned, flags=re.IGNORECASE)
+        segments.extend(file_segments(piece))
+    for segment in sorted(set(segments), key=len, reverse=True):
+        cleaned = re.sub(
+            rf"(?<![0-9A-Za-zА-Яа-яЁё]){re.escape(segment)}(?![0-9A-Za-zА-Яа-яЁё])",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    return cleaned
+
+
+def _choice_words(text: str, filenames: list[str]) -> list[str]:
+    """Words of length 3 or more, after the named workbook is removed."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in _WORD.findall(_without_filenames(text, filenames).casefold()):
+        if len(word) < 3 or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    return words
+
+
+def named_label_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> list[dict[str, Any]] | None:
+    """Rows of the one label whose words are the whole reply.
+
+    Two labels with the same words stay out. A longer line that starts with
+    this label, or ends with it in parentheses, stays out too. An empty word
+    set is not a name.
+    """
+    words = set(_choice_words(text, list(filenames or [])))
+    if not words:
+        return None
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        label = str(row.get("label") or "").strip()
+        key = str(row.get("row_key") or "")
+        if not label or set(_choice_words(label, [])) != words:
+            continue
+        folded = label.casefold()
+        bucket = groups.get(folded)
+        if bucket is None:
+            order.append(folded)
+            bucket = []
+            groups[folded] = bucket
+        if key and any(str(item.get("row_key") or "") == key for item in bucket):
+            continue
+        bucket.append(row)
+    if len(order) != 1:
+        return None
+    needle = order[0]
+    for row in rows:
+        other = str(row.get("label") or "").strip()
+        if not other or other.casefold() == needle:
+            continue
+        if _keeps_longer(other, needle):
+            return None
+    return groups[needle]
+
+
+def choice_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Labels that share the reply's words. The top score, and one below it
+    when that neighbor is still a short overlap.
+
+    A score of zero stays out, so a top score of one does not pull in the book.
+    The neighbor is kept for BoP 3 / EoP 2 and for exact CAPEX 4 / the shorter
+    line 3. A score of 1 under a top of 2 would pull in every debt line, and a
+    score of 5 under a specific label of 6 is the shorter copy.
+    At most MENU_CAP distinct labels. Two sheets of one label share one slot.
+    """
+    words = _choice_words(text, list(filenames or []))
+    if not words:
+        return []
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    seen_keys: set[str] = set()
+    for index, row in enumerate(rows):
+        key = str(row.get("row_key") or "")
+        label = str(row.get("label") or "").strip()
+        if not label or (key and key in seen_keys):
+            continue
+        score = sum(1 for word in words if _bounded(label.casefold(), word))
+        if score <= 0:
+            continue
+        if key:
+            seen_keys.add(key)
+        scored.append((score, index, row))
+    if not scored:
+        return []
+    top = max(item[0] for item in scored)
+    bands = [top]
+    if top <= 4 and top - 1 >= 2:
+        bands.append(top - 1)
+    chosen: list[dict[str, Any]] = []
+    taken: set[str] = set()
+    label_count = 0
+    admitted: set[str] = set()
+    for band in bands:
+        for score, _index, row in scored:
+            if score != band:
+                continue
+            key = str(row.get("row_key") or "")
+            if key and key in taken:
+                continue
+            folded = str(row.get("label") or "").strip().casefold()
+            if folded not in admitted:
+                if label_count >= MENU_CAP:
+                    continue
+                admitted.add(folded)
+                label_count += 1
+            if key:
+                taken.add(key)
+            chosen.append(row)
+    return chosen
+
+
+def inventory_rows(
+    text: str, rows: list[dict[str, Any]], filenames: list[str] | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """Every label that shares a reply word. One row per label and sheet.
+
+    The choice pool still drops a neighbor band and stops at MENU_CAP. This
+    list is the wider set printed when the reply asks where the rows sit.
+    """
+    words = _choice_words(text, list(filenames or []))
+    if not words:
+        return [], 0
+    pairs: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    for row in rows:
+        key = str(row.get("row_key") or "")
+        label = str(row.get("label") or "").strip()
+        if not label or (key and key in seen_keys):
+            continue
+        score = sum(1 for word in words if _bounded(label.casefold(), word))
+        if score <= 0:
+            continue
+        if key:
+            seen_keys.add(key)
+        pair = (label.casefold(), str(row.get("sheet") or "").strip().casefold())
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        pairs.append(row)
+    return pairs[:INVENTORY_CAP], len(pairs)
+
+
+def ranker_state(filename: str, text: str, has_rows: bool) -> str:
+    """Utterance alone when a row is offered. The book name only on an empty pool."""
+    if has_rows:
+        return text
+    name = filename.strip()
+    if name:
+        return f"Книга {name}. {text}"
+    return text
 
 
 def _strip_cover(question: str) -> tuple[str, bool]:
@@ -146,6 +475,71 @@ def _split_and(piece: str, axes: list[dict[str, Any]]) -> list[str]:
     if question_mention(left, axes) and question_mention(right, axes):
         return _split_and(left, axes) + _split_and(right, axes)
     return [piece]
+
+
+def books_reply(jobs: list[dict[str, Any]]) -> str:
+    """Finished filenames only. No sheet list and no cell figures."""
+    lines = ["Готовые книги:"]
+    for job in jobs:
+        name = str(job.get("source_filename") or job.get("job_id") or "").strip()
+        if name:
+            lines.append(f"- {name}")
+    return "\n".join(lines)
+
+
+def chitchat_reply() -> str:
+    """Who the agent is. No book name, no sheet list, and no cell figures."""
+    return "\n".join(
+        [
+            "Я finance-context-agent.",
+            "Читаю сохранённые числа книги и отвечаю только по ним.",
+            "Могу найти строку по подписи, показать её по периодам, "
+            "сузить до названного периода и объяснить формулу из кэша.",
+            "Обзор книги даю, когда о нём просят.",
+            "Напишите, что посмотреть.",
+        ]
+    )
+
+
+GOAL_CHOICES = (
+    ("overview", "Обзор книги"),
+    ("catalog", "Перечень атрибутов"),
+    ("figure", "Одну метрику"),
+    ("files", "Другой файл"),
+)
+
+
+def goal_question(filename: str) -> str:
+    """What to look at in the open book. Four actions, no cell figures."""
+    name = filename.strip()
+    head = f"Книга {name} открыта." if name else "Книга открыта."
+    lines = [
+        head,
+        "Могу показать обзор, перечень атрибутов или одну метрику.",
+        "Что посмотреть?",
+    ]
+    for index, (_act, label) in enumerate(GOAL_CHOICES, start=1):
+        lines.append(f"{index}. {label}")
+    return "\n".join(lines)
+
+
+def match_goal(reply: str) -> str | None:
+    """The printed line, its number, or №N. A shorter word is not a choice."""
+    folded = reply.strip().casefold()
+    if not folded:
+        return None
+    for index, (act, label) in enumerate(GOAL_CHOICES, start=1):
+        mark = label.casefold()
+        accepted = {
+            str(index),
+            f"№{index}".casefold(),
+            f"{index}.",
+            mark,
+            f"{index}. {mark}",
+        }
+        if folded in accepted:
+            return act
+    return None
 
 
 def cover_question(summary: dict[str, Any]) -> str:
@@ -401,3 +795,258 @@ def _positive_count(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
+
+
+def act_text(book: str, last: str, row: str, reply: str) -> str:
+    """One string for an anchor and for the live turn. The instruction is on both."""
+    body = f"книга: {book}\nпрошлый ход: {last}\nстрока: {row}\nреплика: {reply}"
+    return _ACT_PREFIX + body
+
+
+def _anchor_rows() -> list[tuple[str, str, str, str, str]]:
+    """(act, book, last, row, reply). Acceptance lines stay out, except the one
+    overview sentence the 4B max probe kept missing until it was stored."""
+    rows: list[tuple[str, str, str, str, str]] = []
+    files = (
+        "список готовых файлов",
+        "какие книги лежат у агента",
+        "что загружено в агента",
+        "имена файлов xlsx",
+        "какие данные лежат у тебя",
+        "покажи загруженные файлы",
+    )
+    for book in ("закрыта", "открыта"):
+        for reply in files:
+            rows.append(("files", book, "пусто", "нет", reply))
+    for reply in (
+        "сделай обзор модели",
+        "краткое содержание книги",
+        "саммари по книге целиком",
+        "расскажи про книгу целиком",
+        "что в книге packt-project-finance.xlsx ?",
+    ):
+        rows.append(("overview", "открыта", "пусто", "нет", reply))
+    for reply in (
+        "перечень показателей книги",
+        "какие строки в этой книге",
+        "список подписей на листе",
+        "что есть внутри модели",
+        "покажи атрибуты",
+        "что есть на листе Debt",
+        "покажи содержимое книги",
+        "что внутри открытой книги",
+    ):
+        rows.append(("catalog", "открыта", "пусто", "нет", reply))
+    for reply in ("а на другом листе", "а что на следующем листе", "а на этом листе", "а на Debt?"):
+        rows.append(("catalog", "открыта", "catalog", "нет", reply))
+    for reply in (
+        "какое число у метрики",
+        "сколько составляет показатель",
+        "значение строки по годам",
+        "Какой неизвестный показатель?",
+        "Какое значение у отсутствующей строки?",
+    ):
+        rows.append(("figure", "открыта", "пусто", "нет", reply))
+    for book in ("закрыта", "открыта"):
+        for reply in ("здравствуйте", "спасибо большое", "добрый вечер", "что умеет агент"):
+            rows.append(("greet", book, "пусто", "нет", reply))
+    for last in ("figure", "пусто"):
+        for reply in (
+            "как считается эта строка",
+            "почему так вышло",
+            "из чего состоит число",
+            "какая формула у строки",
+        ):
+            rows.append(("explain", "открыта", last, "открыта", reply))
+    for reply in ("абвгд", "абракадабра", "хм непонятно", "qqq"):
+        rows.append(("unclear", "открыта", "пусто", "нет", reply))
+    return rows
+
+
+ANCHORS = _anchor_rows()
+
+
+def _unit(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
+
+
+def _dot(left: list[float], right: list[float]) -> float:
+    return sum(one * other for one, other in zip(left, right, strict=True))
+
+
+def class_scores(
+    query: list[float],
+    by_act: dict[str, list[list[float]]],
+    *,
+    how: str = "max",
+) -> dict[str, float]:
+    """Cosine of the query to each act. max keeps one paraphrase; centroid averages."""
+    unit_query = _unit(query)
+    scores: dict[str, float] = {}
+    for act, vectors in by_act.items():
+        units = [_unit(vector) for vector in vectors]
+        if how == "centroid":
+            mean = [sum(column) / len(units) for column in zip(*units, strict=True)]
+            scores[act] = _dot(unit_query, _unit(mean))
+        else:
+            scores[act] = max(_dot(unit_query, vector) for vector in units)
+    return scores
+
+
+def prototype_decision(scores: dict[str, float] | None) -> tuple[str, float, float] | None:
+    """(act, top, gap) when the leader clears both floors. A tie or a thin gap abstains."""
+    if not scores:
+        return None
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    act, top = ordered[0]
+    if act not in ACTS:
+        return None
+    tied = [name for name, score in ordered if abs(score - top) < 1e-9]
+    if len(tied) != 1:
+        return None
+    second = ordered[1][1] if len(ordered) > 1 else 0.0
+    gap = top - second
+    if top < ACT_FLOOR or gap < ACT_GAP:
+        return None
+    return act, top, gap
+
+
+def sole_period_key(
+    text: str,
+    filenames: list[str],
+    axes: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+) -> str | None:
+    """The reply names one period key of the open row. Shorter words are ignored."""
+    if not selected:
+        return None
+    words = [
+        word
+        for word in _WORD.findall(_without_filenames(text, filenames).casefold())
+        if len(word) >= 3
+    ]
+    if len(words) != 1:
+        return None
+    token = words[0]
+    axis_ids = {
+        str(axis_id)
+        for row in selected
+        if isinstance(row, dict)
+        for axis_id in (row.get("axis_ids") or [])
+    }
+    found: list[str] = []
+    for axis in axes:
+        if axis_ids and str(axis.get("id") or "") not in axis_ids:
+            continue
+        for period in axis.get("periods") or []:
+            key = str(period.get("period_key") or "").strip()
+            if key and key.casefold() == token and key not in found:
+                found.append(key)
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def named_sheets(text: str, rows: list[dict[str, Any]]) -> list[str]:
+    """Sheet names the reply mentions. A longer name wins over a piece of itself."""
+    folded = text.casefold()
+    seen: set[str] = set()
+    names: list[str] = []
+    for row in rows:
+        sheet = str(row.get("sheet") or "").strip()
+        key = sheet.casefold()
+        if not sheet or key in seen or sum(char.isalnum() for char in sheet) < 3:
+            continue
+        seen.add(key)
+        names.append(sheet)
+    names.sort(key=len, reverse=True)
+    matched: list[str] = []
+    for name in names:
+        if not _bounded(folded, name.casefold()):
+            continue
+        if any(_bounded(longer.casefold(), name.casefold()) for longer in matched):
+            continue
+        matched.append(name)
+    wanted = {name.casefold() for name in matched}
+    order: list[str] = []
+    emitted: set[str] = set()
+    for row in rows:
+        sheet = str(row.get("sheet") or "").strip()
+        key = sheet.casefold()
+        if key in wanted and key not in emitted:
+            emitted.add(key)
+            order.append(sheet)
+    return order
+
+
+def _markdown_cell(value: str) -> str:
+    """One table cell. A raw pipe would split the row, a newline would end it."""
+    text = " ".join(value.split())
+    return text.replace("|", "\\|")
+
+
+def _pipe_row(cells: list[str]) -> str:
+    shown: list[str] = []
+    for value in cells:
+        text = _markdown_cell(value)
+        shown.append(f" {text} " if text else " ")
+    return "|" + "|".join(shown) + "|"
+
+
+def _pipe_table(headers: list[str], rows: list[list[str]]) -> str:
+    """GFM table. A short row is an assembly error, not a cell to fill with zero."""
+    width = len(headers)
+    lines = [_pipe_row(headers), "|" + "|".join([" --- "] * width) + "|"]
+    for row in rows:
+        if len(row) != width:
+            raise ValueError(f"table row has {len(row)} cells for {width} headers")
+        lines.append(_pipe_row(row))
+    return "\n".join(lines)
+
+
+def _markdown_table(pairs: list[tuple[str, str]]) -> str:
+    """Attribute and section. An empty section stays an empty cell."""
+    return _pipe_table(["Атрибут", "Раздел"], [[label, heading] for label, heading in pairs])
+
+
+def catalog_reply(rows: list[dict[str, Any]], text: str) -> str:
+    """One table per sheet. A named sheet keeps only that sheet. No cell figures."""
+    chosen = {name.casefold() for name in named_sheets(text, rows)}
+    groups: dict[str, list[tuple[str, str]]] = {}
+    sheet_order: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    total = 0
+    for row in rows:
+        label = str(row.get("label") or "").strip()
+        sheet = str(row.get("sheet") or "").strip()
+        if not label or not sheet:
+            continue
+        if chosen and sheet.casefold() not in chosen:
+            continue
+        pair = (label.casefold(), sheet.casefold())
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        total += 1
+        key = sheet.casefold()
+        if key not in groups:
+            sheet_order.append(sheet)
+            groups[key] = []
+        groups[key].append((label, _heading(row.get("label_path"), label)))
+    if total == 0:
+        return ""
+    shown = 0
+    blocks: list[str] = []
+    for sheet in sheet_order:
+        bucket = groups[sheet.casefold()]
+        room = CATALOG_CAP - shown
+        if room <= 0:
+            break
+        take = bucket[:room]
+        shown += len(take)
+        blocks.append(f"Лист {sheet}\n\n{_markdown_table(take)}")
+    body = "\n\n".join(blocks)
+    if total > shown:
+        body = f"{body}\n\nПоказаны первые {shown} из {total}."
+    return body

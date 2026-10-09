@@ -137,14 +137,17 @@ def test_menu_count_is_not_an_invented_number() -> None:
             "outcome": "ask",
             "menu_contains": [
                 "Operating Income or Loss (EBITDA)",
-                "EBITDA [PF Model",
+                "Лист PF Model",
             ],
         },
     }
     content = (
-        "Какую строку взять?\n"
-        "«EBITDA»: 2. Operating Income or Loss (EBITDA) [PF Model, pnl.ebitda]; "
-        "EBITDA [PF Model, pnl.ebitda]"
+        "Какую строку взять? Напишите номер.\n"
+        "«EBITDA»: 2.\n"
+        "№1 Operating Income or Loss (EBITDA)\n"
+        "Лист PF Model. Раздел pnl.ebitda.\n"
+        "№2 EBITDA\n"
+        "Лист PF Model. Раздел pnl.ebitda."
     )
     clean = check_answers.score_case(
         case, _completion(content, [], awaiting=True), lambda _row, _period: None
@@ -152,15 +155,18 @@ def test_menu_count_is_not_an_invented_number() -> None:
     assert clean["passed"] is True
     invented = check_answers.score_case(
         case,
-        _completion(content + " 7694.41", [], awaiting=True),
+        _completion(content + "\n7694.41", [], awaiting=True),
         lambda _row, _period: None,
     )
     assert invented["passed"] is False
     assert invented["value_ok"] is False
     twelve = (
-        "Какую строку взять?\n"
-        "«CFADS»: 8. Debt Service Coverage Ratio (last 12 months) "
-        "[PF Model, cf.cfads]; CFADS [PF Model, cf.cfads]"
+        "Какую строку взять? Напишите номер.\n"
+        "«CFADS»: 8.\n"
+        "№1 Debt Service Coverage Ratio (last 12 months)\n"
+        "Лист PF Model. Раздел cf.cfads.\n"
+        "№2 CFADS\n"
+        "Лист PF Model. Раздел cf.cfads."
     )
     masked = check_answers.score_case(
         {

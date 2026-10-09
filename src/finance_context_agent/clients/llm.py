@@ -27,7 +27,14 @@ class ModelError(Exception):
 
 
 class JsonModel(Protocol):
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]: ...
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def chat_completions_url(base_url: str) -> str:
@@ -53,7 +60,9 @@ class Trace(StrEnum):
     dependents = "dependents"
 
 
-class AboutTarget(StrEnum):
+class DialogAct(StrEnum):
+    chitchat = "chitchat"
+    books = "books"
     book = "book"
     row = "row"
 
@@ -128,22 +137,80 @@ class Answer(BaseModel):
 
 class About(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    about: AboutTarget
+    acts: list[DialogAct]
 
 
-_MODELS: dict[str, type[BaseModel]] = {"plan": Plan, "answer": Answer, "about": About}
+class TalkAct(StrEnum):
+    files = "files"
+    overview = "overview"
+    catalog = "catalog"
+    figure = "figure"
+    greet = "greet"
+    explain = "explain"
+    unclear = "unclear"
+
+
+class Talk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    act: TalkAct
+
+
+_MODELS: dict[str, type[BaseModel]] = {
+    "plan": Plan,
+    "answer": Answer,
+    "about": About,
+    "talk": Talk,
+}
 _SCHEMA_DROP = {"title", "default", "$defs", "$schema", "$comment"}
 
 
-def response_format_for(role: str) -> dict[str, Any]:
+def response_format_for(role: str, options: list[str] | None = None) -> dict[str, Any]:
     """OpenAI Chat Completions structured output for one graph role."""
+    if role == "choose":
+        schema = _choose_schema(options)
+    elif role == "view":
+        schema = _view_schema(options)
+    else:
+        schema = _strict_json_schema(_MODELS[role])
     return {
         "type": "json_schema",
         "json_schema": {
             "name": role,
             "strict": True,
-            "schema": _strict_json_schema(_MODELS[role]),
+            "schema": schema,
         },
+    }
+
+
+def _choice_enum(options: list[str] | None) -> list[str]:
+    numbers = [str(item) for item in (options or [])]
+    if not numbers:
+        raise ValueError("choose requires menu numbers")
+    return ["none", *numbers]
+
+
+def _choose_schema(options: list[str] | None) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"option": {"type": "string", "enum": _choice_enum(options)}},
+        "additionalProperties": False,
+        "required": ["option"],
+    }
+
+
+def _view_enum(options: list[str] | None) -> list[str]:
+    values = [str(item) for item in (options or [])]
+    if "sentence" not in values:
+        raise ValueError("view requires sentence")
+    return values
+
+
+def _view_schema(options: list[str] | None) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"view": {"type": "string", "enum": _view_enum(options)}},
+        "additionalProperties": False,
+        "required": ["view"],
     }
 
 
@@ -220,8 +287,14 @@ class OpenAIChat:
         if self._owns_client:
             await self._client.aclose()
 
-    async def complete_json(self, *, role: str, system: str, user: str) -> dict[str, Any]:
-        model = _MODELS[role]
+    async def complete_json(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "model": self._model,
             "temperature": self._temperature,
@@ -229,7 +302,7 @@ class OpenAIChat:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "response_format": response_format_for(role),
+            "response_format": response_format_for(role, options),
         }
         last = "empty"
         for _ in range(2):
@@ -250,14 +323,38 @@ class OpenAIChat:
                 last = content[:200]
                 continue
             if isinstance(parsed, dict):
-                try:
-                    checked = model.model_validate(parsed)
-                except ValidationError:
+                checked = _accept_json(role, parsed, options)
+                if checked is None:
                     last = "invalid"
                     continue
-                return checked.model_dump(mode="json")
+                return checked
             last = "not-object"
         raise SchemaError(last)
+
+
+def _accept_json(
+    role: str, parsed: dict[str, Any], options: list[str] | None
+) -> dict[str, Any] | None:
+    if role == "choose":
+        allowed = set(_choice_enum(options))
+        if set(parsed) != {"option"}:
+            return None
+        option = parsed.get("option")
+        if not isinstance(option, str) or option not in allowed:
+            return None
+        return {"option": option}
+    if role == "view":
+        allowed = set(_view_enum(options))
+        if set(parsed) != {"view"}:
+            return None
+        view = parsed.get("view")
+        if not isinstance(view, str) or view not in allowed:
+            return None
+        return {"view": view}
+    try:
+        return _MODELS[role].model_validate(parsed).model_dump(mode="json")
+    except ValidationError:
+        return None
 
 
 def _message_content(payload: Any) -> str:

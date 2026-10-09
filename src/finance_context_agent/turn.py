@@ -25,16 +25,19 @@ def new_turn_input(question: str, job_id: str | None = None) -> dict[str, Any]:
         "reload": False,
         "search_again": False,
         "just_bound_job": False,
+        "just_bound_row": False,
+        "offers": [],
         "clarify_rounds": 0,
         "last_user_question": "",
+        "menu_question": "",
         "steps": [],
         "draft": "",
-        "selected": [],
-        "period_ids": [],
         "search_note": "",
         "plan": {},
         "proposed_citations": [],
         "schema_error": False,
+        "draft_from_cache": False,
+        "cache_missing": False,
     }
     if job_id:
         payload["job_id"] = job_id
