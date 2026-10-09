@@ -16,6 +16,7 @@ from finance_context_agent.questions import (
     book_overview,
     books_reply,
     chitchat_reply,
+    goal_question,
     question_needles,
 )
 from finance_context_agent.session import interrupts_of
@@ -925,15 +926,17 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
     )
     greeting = await graph.aget_state(run_config("thread-chat"))
     introduction = chitchat_reply()
+    asked = goal_question("packt-project-finance.xlsx")
     assert "finance-context-agent" in introduction
     assert "формулу из кэша" in introduction
-    assert not interrupts_of(greeting)
-    assert greeting.values["satisfactory"] is True
-    assert greeting.values["draft"] == introduction
-    assert "packt-project-finance.xlsx" not in greeting.values["draft"]
-    assert "99" not in greeting.values["draft"]
-    assert "Лист" not in greeting.values["draft"]
-    assert not any(char.isdigit() for char in greeting.values["draft"])
+    assert interrupts_of(greeting)
+    assert greeting.values["pending"] == "goal"
+    assert greeting.values["job_id"] == "job-1"
+    assert greeting.values["user_question"] == asked
+    assert "99" not in greeting.values["user_question"]
+    assert "Лист" not in greeting.values["user_question"]
+    assert "Готовые книги:" not in greeting.values["user_question"]
+    assert "Готовые книги:" not in (greeting.values.get("draft") or "")
     assert parser.observation_calls == []
     assert len(parser.context_calls) == heard
     _act(embedder, "greet")
@@ -943,17 +946,21 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
         durability="sync",
     )
     able = await graph.aget_state(run_config("thread-able"))
-    assert able.values["draft"] == greeting.values["draft"]
+    assert interrupts_of(able)
+    assert able.values["pending"] == "goal"
+    assert able.values["user_question"] == asked
     assert len(parser.context_calls) == heard
     _act(embedder, "greet")
     await graph.ainvoke(
         new_turn_input("Спасибо", "job-1"),
-        run_config("thread-chat"),
+        run_config("thread-thanks"),
         durability="sync",
     )
-    thanks = await graph.aget_state(run_config("thread-chat"))
-    assert thanks.values["draft"] == greeting.values["draft"]
-    assert "CPI" not in thanks.values["draft"]
+    thanks = await graph.aget_state(run_config("thread-thanks"))
+    assert interrupts_of(thanks)
+    assert thanks.values["pending"] == "goal"
+    assert thanks.values["user_question"] == asked
+    assert "CPI" not in thanks.values["user_question"]
     assert len(parser.context_calls) == heard
     assert parser.observation_calls == []
     _act(embedder, "greet")
@@ -1001,10 +1008,11 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
         durability="sync",
     )
     left = await graph.aget_state(run_config("thread-leave"))
-    assert not interrupts_of(left)
-    assert left.values["draft"] == introduction
+    assert interrupts_of(left)
+    assert left.values["pending"] == "goal"
     assert left.values["question"] == "QQQ?"
-    assert left.values["user_question"] == ""
+    assert left.values["user_question"] == asked
+    assert "Готовые книги:" not in left.values["user_question"]
     assert len(parser.catalog_calls) == searched
     _act(embedder, "unclear")
     await _run(graph, "RRR?", thread="thread-label")
@@ -1103,9 +1111,12 @@ async def test_two_misses_ask_that_the_row_is_missing() -> None:
         durability="sync",
     )
     hello = await graph.aget_state(run_config("thread-hello-slot"))
-    assert hello.values["draft"] == introduction
-    assert "packt-project-finance.xlsx" not in hello.values["draft"]
-    assert "rvi-project-finance.xlsx" not in hello.values["draft"]
+    assert interrupts_of(hello)
+    assert hello.values["pending"] == "goal"
+    assert hello.values["job_id"] == "job-1"
+    assert hello.values["user_question"] == asked
+    assert "rvi-project-finance.xlsx" not in hello.values["user_question"]
+    assert "Готовые книги:" not in hello.values["user_question"]
     assert len(parser.context_calls) == hello_context
     _act(embedder, "figure")
     await graph.ainvoke(
@@ -1450,9 +1461,11 @@ async def test_why_after_a_finished_answer_does_not_ask_the_row_again() -> None:
         new_turn_input("Спасибо", "job-1"), run_config("thread-1"), durability="sync"
     )
     thanks = await graph.aget_state(run_config("thread-1"))
-    assert thanks.values["draft"] == chitchat_reply()
-    assert "finance-context-agent" in thanks.values["draft"]
-    assert "1.25" not in thanks.values["draft"]
+    assert interrupts_of(thanks)
+    assert thanks.values["pending"] == "goal"
+    assert thanks.values["user_question"] == goal_question("")
+    assert "1.25" not in thanks.values["user_question"]
+    assert "Готовые книги:" not in thanks.values["user_question"]
     assert len(parser.observation_calls) == fetched
 
 
@@ -1582,8 +1595,10 @@ async def test_crashed_run_continues_with_empty_input() -> None:
     await graph.ainvoke(None, run_config("thread-1"), durability="sync")
     done = await graph.aget_state(run_config("thread-1"))
     assert done.values["question"] == "Какой?"
-    assert done.values["satisfactory"] is True
-    assert done.values["draft"] == chitchat_reply()
+    assert interrupts_of(done)
+    assert done.values["pending"] == "goal"
+    assert done.values["user_question"] == goal_question("")
+    assert done.values["job_id"] == "job-1"
 
 
 @pytest.mark.asyncio
@@ -2515,14 +2530,14 @@ async def test_filename_after_a_greeting_is_the_introduction() -> None:
     assert ranker.calls == []
     await graph.ainvoke(Command(resume=_PACKT), run_config("thread-hi"), durability="sync")
     snap = await graph.aget_state(run_config("thread-hi"))
-    assert not interrupts_of(snap)
+    assert interrupts_of(snap)
+    assert snap.values["pending"] == "goal"
     assert snap.values["job_id"] == "job-1"
-    assert snap.values["draft"] == chitchat_reply()
-    assert snap.values["satisfactory"] is True
-    assert snap.values["citations"] == []
-    assert "Такой строки нет" not in snap.values["draft"]
-    assert _PACKT not in snap.values["draft"]
-    assert "Какую книгу открыть?" not in snap.values["draft"]
+    assert snap.values["user_question"] == goal_question(_PACKT)
+    assert "Что посмотреть?" in snap.values["user_question"]
+    assert "Готовые книги:" not in snap.values["user_question"]
+    assert "Готовые книги:" not in (snap.values.get("draft") or "")
+    assert "Такой строки нет" not in snap.values["user_question"]
     assert parser.observation_calls == []
     assert parser.context_calls == []
     assert ranker.calls == []
@@ -2570,9 +2585,11 @@ async def test_greeting_inside_an_open_book_survives_a_miss() -> None:
         durability="sync",
     )
     snap = await graph.aget_state(run_config("thread-open-hi"))
-    assert not interrupts_of(snap)
-    assert snap.values["draft"] == chitchat_reply()
-    assert _PACKT not in snap.values["draft"]
+    assert interrupts_of(snap)
+    assert snap.values["pending"] == "goal"
+    assert snap.values["user_question"] == goal_question(_PACKT)
+    assert _PACKT in snap.values["user_question"]
+    assert "Готовые книги:" not in snap.values["user_question"]
     assert snap.values["job_id"] == "job-1"
     assert ranker.calls == []
     assert parser.context_calls == []
@@ -2584,6 +2601,171 @@ def _capex_catalog() -> list[dict]:
         catalog_row("bare", "CAPEX", sheet="Construction"),
         catalog_row("short", "CAPEX (incl. SPV costs)", sheet="Ratios"),
     ]
+
+
+_RVI = "rvi-project-finance.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_open_book_asks_what_to_look_at() -> None:
+    parser = FakeParser()
+    parser.axes = year_axes()
+    parser.jobs = [
+        {"job_id": "job-1", "source_filename": _PACKT},
+        {"job_id": "job-2", "source_filename": _RVI},
+    ]
+    parser.context = _book_document()
+    parser.rows["job-1"] = _capex_catalog() + [catalog_row("ebitda", "EBITDA", sheet="P&L")]
+    parser.observations[("job-1", "exact")] = [
+        observation("exact", "Y1", "300000000", "C5", label="CAPEX (including SPV costs)")
+    ]
+    parser.observations[("job-1", "ebitda")] = [
+        observation("ebitda", "Y1", "88", "C8", label="EBITDA")
+    ]
+
+    async def summaries(job_id: str):
+        name = _PACKT if job_id == "job-1" else _RVI
+        parser.summary = {"source_filename": name, "marker": "passport", "coverage": {"mapped": 1}}
+        return parser.summary, parser.summary_etag
+
+    parser.get_summary = summaries
+    ranker = FakeRanker()
+    embedder = FakeEmbed()
+    graph = _graph(parser, ScriptedModel(), ranker=ranker, embedder=embedder)
+    _act(embedder, "files")
+    await graph.ainvoke(
+        new_turn_input(f"открой {_PACKT}", "job-1"),
+        run_config("thread-words"),
+        durability="sync",
+    )
+    words = await graph.aget_state(run_config("thread-words"))
+    assert interrupts_of(words)
+    assert words.values["user_question"] == goal_question(_PACKT)
+    assert "Готовые книги:" not in words.values["user_question"]
+    assert ranker.calls == []
+    await graph.ainvoke(
+        Command(resume="Обзор книги"), run_config("thread-words"), durability="sync"
+    )
+    named = await graph.aget_state(run_config("thread-words"))
+    assert not interrupts_of(named)
+    assert named.values["draft"] == book_overview(parser.context)
+    assert named.values["last_act"] == "overview"
+    assert named.values["pending"] == ""
+    assert named.values["menu_question"] == ""
+    assert named.values["offers"] == []
+    assert parser.observation_calls == []
+
+    _act(embedder, "files")
+    await graph.ainvoke(
+        new_turn_input(f"открой {_PACKT}", "job-1"),
+        run_config("thread-goal"),
+        durability="sync",
+    )
+    opened = await graph.aget_state(run_config("thread-goal"))
+    assert interrupts_of(opened)
+    assert opened.values["pending"] == "goal"
+    assert opened.values["user_question"] == goal_question(_PACKT)
+    assert "Готовые книги:" not in (opened.values.get("draft") or "")
+    assert ranker.calls == []
+    await graph.ainvoke(Command(resume="1"), run_config("thread-goal"), durability="sync")
+    overview = await graph.aget_state(run_config("thread-goal"))
+    assert not interrupts_of(overview)
+    assert overview.values["draft"] == book_overview(parser.context)
+    assert overview.values["last_act"] == "overview"
+    assert overview.values["pending"] == ""
+    assert overview.values["offers"] == []
+
+    _act(embedder, "greet")
+    await graph.ainvoke(
+        new_turn_input("привет", "job-1"), run_config("thread-goal"), durability="sync"
+    )
+    await graph.ainvoke(Command(resume="2"), run_config("thread-goal"), durability="sync")
+    listed = await graph.aget_state(run_config("thread-goal"))
+    assert not interrupts_of(listed)
+    assert listed.values["last_act"] == "catalog"
+    assert "Лист Input Assumptions" in listed.values["draft"]
+    assert "Лист Construction" in listed.values["draft"]
+    assert "| Атрибут | Раздел |" in listed.values["draft"]
+    assert "300000000" not in listed.values["draft"]
+    assert "88" not in listed.values["draft"]
+    assert parser.observation_calls == []
+
+    _act(embedder, "greet")
+    await graph.ainvoke(
+        new_turn_input("привет", "job-1"), run_config("thread-goal"), durability="sync"
+    )
+    await graph.ainvoke(Command(resume="3"), run_config("thread-goal"), durability="sync")
+    label = await graph.aget_state(run_config("thread-goal"))
+    assert interrupts_of(label)
+    assert label.values["user_question"] == "Назовите подпись."
+    embedded = len(embedder.calls)
+    ranker.push("r0", {"r0": 0.9, "r1": 0.05}, sheets=0.10)
+    await graph.ainvoke(
+        Command(resume="CAPEX (including SPV costs)"),
+        run_config("thread-goal"),
+        durability="sync",
+    )
+    cited = await graph.aget_state(run_config("thread-goal"))
+    assert not interrupts_of(cited)
+    assert cited.values["citations"][0]["value"] == "300000000"
+    assert cited.values["citations"][0]["row_key"] == "exact"
+    assert len(embedder.calls) == embedded
+    assert ranker.calls
+
+    _act(embedder, "greet")
+    await graph.ainvoke(
+        new_turn_input("привет", "job-1"), run_config("thread-goal"), durability="sync"
+    )
+    await graph.ainvoke(Command(resume="4"), run_config("thread-goal"), durability="sync")
+    other = await graph.aget_state(run_config("thread-goal"))
+    assert interrupts_of(other)
+    assert other.values["pending"] == "job"
+    assert other.values["question"] == ""
+    assert "Какую книгу открыть?" in other.values["user_question"]
+    assert _PACKT in other.values["user_question"]
+    assert _RVI in other.values["user_question"]
+    before_switch = len(embedder.calls)
+    await graph.ainvoke(
+        Command(resume=_RVI), run_config("thread-goal"), durability="sync"
+    )
+    switched = await graph.aget_state(run_config("thread-goal"))
+    assert switched.values["job_id"] == "job-2"
+    assert interrupts_of(switched)
+    assert switched.values["pending"] == "goal"
+    assert switched.values["user_question"] == goal_question(_RVI)
+    assert "Готовые книги:" not in switched.values["user_question"]
+    assert len(embedder.calls) == before_switch
+
+    _act(embedder, "files")
+    await graph.ainvoke(
+        new_turn_input(f"открой {_PACKT}", "job-1"),
+        run_config("thread-metric"),
+        durability="sync",
+    )
+    metric_embedded = len(embedder.calls)
+    ranker.push("r0", {"r0": 0.9}, sheets=0.10)
+    await graph.ainvoke(
+        Command(resume="Какой EBITDA в Y1?"),
+        run_config("thread-metric"),
+        durability="sync",
+    )
+    metric = await graph.aget_state(run_config("thread-metric"))
+    assert not interrupts_of(metric)
+    assert metric.values["pending"] == ""
+    assert metric.values["citations"][0]["value"] == "88"
+    assert metric.values["citations"][0]["period_id"] == "Y1"
+    assert len(embedder.calls) == metric_embedded
+    assert len(ranker.calls) >= 2
+
+    _act(embedder, "files")
+    await graph.ainvoke(
+        new_turn_input("какие книги ?"), run_config("thread-list"), durability="sync"
+    )
+    inventory = await graph.aget_state(run_config("thread-list"))
+    assert not interrupts_of(inventory)
+    assert inventory.values["draft"].startswith("Готовые книги:")
+    assert _PACKT in inventory.values["draft"]
+    assert _RVI in inventory.values["draft"]
 
 
 @pytest.mark.asyncio
@@ -2696,13 +2878,36 @@ def _attribute_parser() -> FakeParser:
 
 _CAPEX_CATALOG = (
     "Лист Input Assumptions\n"
-    "CAPEX (including SPV costs). Раздел COSTS DURING CONSTRUCTION.\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX (including SPV costs) | COSTS DURING CONSTRUCTION |\n"
+    "\n"
     "Лист Construction\n"
-    "CAPEX\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX | |\n"
+    "\n"
     "Лист Ratios\n"
-    "CAPEX (incl. SPV costs). Раздел Project IRR.\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX (incl. SPV costs) | Project IRR |\n"
+    "\n"
     "Лист P&L\n"
-    "EBITDA"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| EBITDA | |"
+)
+
+_CONSTRUCTION_CATALOG = (
+    "Лист Construction\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX | |"
 )
 
 
@@ -2748,7 +2953,7 @@ async def test_named_sheet_keeps_only_that_sheet() -> None:
     graph = _graph(parser, ScriptedModel(), embedder=embedder)
     await _run(graph, "что есть на листе Construction")
     direct = await graph.aget_state(run_config("thread-1"))
-    assert direct.values["draft"] == "Лист Construction\nCAPEX"
+    assert direct.values["draft"] == _CONSTRUCTION_CATALOG
     assert "EBITDA" not in direct.values["draft"]
     assert "Input Assumptions" not in direct.values["draft"]
     await graph.ainvoke(
@@ -2757,7 +2962,7 @@ async def test_named_sheet_keeps_only_that_sheet() -> None:
         durability="sync",
     )
     follow = await graph.aget_state(run_config("thread-1"))
-    assert follow.values["draft"] == "Лист Construction\nCAPEX"
+    assert follow.values["draft"] == _CONSTRUCTION_CATALOG
     assert follow.values["last_act"] == "catalog"
     assert len(embedder.calls) == 2
     assert "прошлый ход: catalog" in embedder.calls[1]

@@ -461,6 +461,47 @@ def chitchat_reply() -> str:
     )
 
 
+GOAL_CHOICES = (
+    ("overview", "Обзор книги"),
+    ("catalog", "Перечень атрибутов"),
+    ("figure", "Одну метрику"),
+    ("files", "Другой файл"),
+)
+
+
+def goal_question(filename: str) -> str:
+    """What to look at in the open book. Four actions, no cell figures."""
+    name = filename.strip()
+    head = f"Книга {name} открыта." if name else "Книга открыта."
+    lines = [
+        head,
+        "Могу показать обзор, перечень атрибутов или одну метрику.",
+        "Что посмотреть?",
+    ]
+    for index, (_act, label) in enumerate(GOAL_CHOICES, start=1):
+        lines.append(f"{index}. {label}")
+    return "\n".join(lines)
+
+
+def match_goal(reply: str) -> str | None:
+    """The printed line, its number, or №N. A shorter word is not a choice."""
+    folded = reply.strip().casefold()
+    if not folded:
+        return None
+    for index, (act, label) in enumerate(GOAL_CHOICES, start=1):
+        mark = label.casefold()
+        accepted = {
+            str(index),
+            f"№{index}".casefold(),
+            f"{index}.",
+            mark,
+            f"{index}. {mark}",
+        }
+        if folded in accepted:
+            return act
+    return None
+
+
 def cover_question(summary: dict[str, Any]) -> str:
     lines: list[str] = []
     filename = str(summary.get("source_filename") or "").strip()
@@ -899,10 +940,29 @@ def named_sheets(text: str, rows: list[dict[str, Any]]) -> list[str]:
     return order
 
 
+def _markdown_cell(value: str) -> str:
+    """One table cell. A raw pipe would split the row, a newline would end it."""
+    text = " ".join(value.split())
+    return text.replace("|", "\\|")
+
+
+def _markdown_table(pairs: list[tuple[str, str]]) -> str:
+    """Attribute and section. An empty section stays an empty cell."""
+    lines = ["| Атрибут | Раздел |", "| --- | --- |"]
+    for label, heading in pairs:
+        name = _markdown_cell(label)
+        section = _markdown_cell(heading)
+        if section:
+            lines.append(f"| {name} | {section} |")
+        else:
+            lines.append(f"| {name} | |")
+    return "\n".join(lines)
+
+
 def catalog_reply(rows: list[dict[str, Any]], text: str) -> str:
-    """Labels grouped by sheet. A named sheet keeps only that sheet. No cell figures."""
+    """One table per sheet. A named sheet keeps only that sheet. No cell figures."""
     chosen = {name.casefold() for name in named_sheets(text, rows)}
-    groups: dict[str, list[str]] = {}
+    groups: dict[str, list[tuple[str, str]]] = {}
     sheet_order: list[str] = []
     seen_pairs: set[tuple[str, str]] = set()
     total = 0
@@ -922,27 +982,20 @@ def catalog_reply(rows: list[dict[str, Any]], text: str) -> str:
         if key not in groups:
             sheet_order.append(sheet)
             groups[key] = []
-        groups[key].append(_catalog_line(row, label))
+        groups[key].append((label, _heading(row.get("label_path"), label)))
     if total == 0:
         return ""
     shown = 0
-    lines: list[str] = []
+    blocks: list[str] = []
     for sheet in sheet_order:
         bucket = groups[sheet.casefold()]
         room = CATALOG_CAP - shown
         if room <= 0:
             break
         take = bucket[:room]
-        lines.append(f"Лист {sheet}")
-        lines.extend(take)
         shown += len(take)
+        blocks.append(f"Лист {sheet}\n\n{_markdown_table(take)}")
+    body = "\n\n".join(blocks)
     if total > shown:
-        lines.append(f"Показаны первые {shown} из {total}.")
-    return "\n".join(lines)
-
-
-def _catalog_line(row: dict[str, Any], label: str) -> str:
-    heading = _heading(row.get("label_path"), label)
-    if heading:
-        return f"{label}. Раздел {heading}."
-    return label
+        body = f"{body}\n\nПоказаны первые {shown} из {total}."
+    return body

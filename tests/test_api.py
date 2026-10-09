@@ -12,7 +12,7 @@ from finance_context_agent.clients.lock import MemoryThreadLock
 from finance_context_agent.clients.parser import ParserError
 from finance_context_agent.clients.ranker import Choice
 from finance_context_agent.graph import build_graph
-from finance_context_agent.questions import ACTS
+from finance_context_agent.questions import ACTS, goal_question
 from finance_context_agent.session import derived_thread_id
 from finance_context_agent.turn import run_config
 from tests.fakes import (
@@ -192,11 +192,13 @@ async def test_missing_thread_id_is_minted() -> None:
     assert paused_hello.json()["awaiting_user"] is True
     assert "Такой строки нет" in paused_hello.json()["choices"][0]["message"]["content"]
     fresh_body = fresh_hello.json()
+    fresh_text = fresh_body["choices"][0]["message"]["content"]
     assert fresh_hello.status_code == 200
     assert fresh_body["thread_id"] == derived_thread_id(hello)
-    assert fresh_body["awaiting_user"] is False
-    assert "Такой строки нет" not in fresh_body["choices"][0]["message"]["content"]
-    assert "finance-context-agent" in fresh_body["choices"][0]["message"]["content"]
+    assert fresh_body["awaiting_user"] is True
+    assert fresh_text == goal_question("")
+    assert "Такой строки нет" not in fresh_text
+    assert "finance-context-agent" not in fresh_text
 
 
 @pytest.mark.asyncio
@@ -326,7 +328,10 @@ async def test_crashed_run_is_continued_instead_of_replacing_the_question() -> N
         assert failed.json()["error"] == "upstream_unavailable"
         continued = await client.post("/v1/chat/completions", json=_payload("другой вопрос"))
     assert continued.status_code == 200
-    assert continued.json()["satisfactory"] is True
+    continued_body = continued.json()
+    assert continued_body["awaiting_user"] is True
+    assert continued_body["satisfactory"] is False
+    assert continued_body["choices"][0]["message"]["content"] == goal_question("")
     snap = await graph.aget_state(run_config(THREAD))
     assert snap.values["question"] == "Какой?"
 

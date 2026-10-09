@@ -31,6 +31,7 @@ from finance_context_agent.prompts import (
 )
 from finance_context_agent.questions import (
     ACTS,
+    GOAL_CHOICES,
     HOLD_FLOOR,
     LIST_FLOOR,
     act_text,
@@ -42,7 +43,9 @@ from finance_context_agent.questions import (
     choice_rows,
     decide_margin,
     file_segments,
+    goal_question,
     inventory_rows,
+    match_goal,
     name_tokens,
     prototype_decision,
     ranker_state,
@@ -156,6 +159,9 @@ def build_graph(
         axes = list(state.get("axes") or [])
         reply = str(state.get("human_reply") or "").strip()
         text = reply or question
+        # Empty text is the hand-off after «Другой файл». The old sentence must not replay.
+        if not text.strip():
+            return _goal_pause(state)
         if ".xlsx" in text.casefold() or ".xlsm" in text.casefold():
             loaded = await _succeeded_jobs(parser)
             if isinstance(loaded, dict):
@@ -228,6 +234,8 @@ def build_graph(
         return _single(state, pages, settings)
 
     async def bind(state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("pending") == "goal":
+            return await _bind_goal(state, parser, settings, label_rows)
         # A row pause with no menu is a period or a miss; that reply still goes to plan.
         if state.get("pending") == "row":
             offers = list(state.get("offers") or [])
@@ -645,6 +653,95 @@ def _act_names(parsed: Any) -> list[str]:
     if not isinstance(acts, list):
         return []
     return [str(item) for item in acts]
+
+
+def _goal_pause(state: dict[str, Any]) -> dict[str, Any]:
+    """Ask what to look at. The open book stays, and the draft is not the answer."""
+    filename = str((state.get("summary") or {}).get("source_filename") or "")
+    question = goal_question(filename)
+    return {
+        "user_question": question,
+        "menu_question": question,
+        "offers": [{"act": act, "label": label} for act, label in GOAL_CHOICES],
+        "awaiting": "goal",
+        "pending": "goal",
+        "clarify_rounds": 0,
+        "terminal": "",
+        "just_bound_job": False,
+        "just_bound_row": False,
+        "human_reply": "",
+    }
+
+
+def _goal_closed() -> dict[str, Any]:
+    """Drop the goal menu and keep the reply for plan."""
+    return {
+        "offers": [],
+        "pending": "",
+        "awaiting": "",
+        "user_question": "",
+        "menu_question": "",
+        "just_bound_row": False,
+        "just_bound_job": False,
+        "terminal": "",
+        "clarify_rounds": 0,
+    }
+
+
+async def _bind_goal(
+    state: dict[str, Any],
+    parser: ParserClient,
+    settings: Settings,
+    label_rows: dict[tuple[str, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """A number or a printed line runs that action. Anything else is a new turn."""
+    reply = str(state.get("human_reply") or "")
+    folded = reply.strip().casefold()
+    shown = {
+        str(state.get("menu_question") or "").strip().casefold(),
+        str(state.get("user_question") or "").strip().casefold(),
+    }
+    shown.discard("")
+    if not folded or folded in shown:
+        return _goal_pause(state)
+    choice = match_goal(reply)
+    job_id = str(state.get("job_id") or "")
+    if choice == "overview":
+        opened = await _overview_of(parser, job_id)
+        if not opened.get("satisfactory"):
+            return opened
+        return opened | {
+            "last_act": "overview",
+            "offers": [],
+            "pending": "",
+            "awaiting": "",
+            "menu_question": "",
+            "user_question": "",
+            "human_reply": "",
+            "clarify_rounds": 0,
+        }
+    if choice == "catalog":
+        found = await _label_rows_for(state, parser, label_rows)
+        if isinstance(found, dict):
+            return found
+        draft = catalog_reply(found, "")
+        if not draft:
+            return _missing(state, settings, "catalog")
+        return _finished(draft, "catalog", job_id) | {"clarify_rounds": 0}
+    if choice == "figure":
+        return _ask(state, "Назовите подпись.", settings=settings) | {"clarify_rounds": 0}
+    if choice == "files":
+        loaded = await _succeeded_jobs(parser)
+        if isinstance(loaded, dict):
+            return loaded
+        return _job_pause(loaded) | {
+            "question": "",
+            "last_act": "",
+            "menu_question": "",
+            "offers": [],
+            "clarify_rounds": 0,
+        }
+    return _goal_closed()
 
 
 def _job_pause(jobs: list[dict[str, Any]], *, again: bool = False) -> dict[str, Any]:
@@ -1354,7 +1451,20 @@ async def _emit(
     job_id = str(state.get("job_id") or "")
     held = [row for row in (state.get("selected") or []) if isinstance(row, dict)]
     if act == "files":
-        return await _books_answer(parser, jobs) | {"last_act": "files"}
+        loaded = jobs
+        if loaded is None:
+            loaded = await _succeeded_jobs(parser)
+            if isinstance(loaded, dict):
+                return loaded
+        named = _named_jobs(text, loaded)
+        same_book = (
+            bool(job_id)
+            and len(named) == 1
+            and str(named[0].get("job_id") or "") == job_id
+        )
+        if same_book:
+            return _goal_pause(state)
+        return await _books_answer(parser, loaded) | {"last_act": "files"}
     if act == "overview":
         if job_id:
             return await _overview_of(parser, job_id) | {"last_act": "overview"}
@@ -1389,7 +1499,7 @@ async def _emit(
         return await _need_book(parser, jobs)
     if act == "greet":
         if job_id:
-            return _agent_reply() | {"last_act": "greet"}
+            return _goal_pause(state) | {"last_act": "greet"}
         if jobs is None:
             loaded = await _succeeded_jobs(parser)
             if isinstance(loaded, dict):

@@ -7,7 +7,9 @@ from finance_context_agent.questions import (
     catalog_reply,
     choice_rows,
     class_scores,
+    goal_question,
     inventory_rows,
+    match_goal,
     prototype_decision,
     ranker_state,
 )
@@ -206,19 +208,103 @@ def test_max_keeps_a_matching_anchor_and_the_centroid_shrinks_it() -> None:
     assert class_scores(query, anchors, how="centroid")["catalog"] < 1.0
 
 
+_CATALOG_TABLE = (
+    "Лист Input Assumptions\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX (including SPV costs) | COSTS DURING CONSTRUCTION |\n"
+    "\n"
+    "Лист Construction\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX | |\n"
+    "\n"
+    "Лист Ratios\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX (incl. SPV costs) | Project IRR |\n"
+    "\n"
+    "Лист P&L\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| EBITDA | |"
+)
+
+_CONSTRUCTION_TABLE = (
+    "Лист Construction\n"
+    "\n"
+    "| Атрибут | Раздел |\n"
+    "| --- | --- |\n"
+    "| CAPEX | |"
+)
+
+
 def test_catalog_reply_groups_sheets_and_can_keep_one() -> None:
     rows = _capex_book()
     full = catalog_reply(rows, "дай список атрибутов в этой книге")
-    assert full == (
-        "Лист Input Assumptions\n"
-        "CAPEX (including SPV costs). Раздел COSTS DURING CONSTRUCTION.\n"
-        "Лист Construction\n"
-        "CAPEX\n"
-        "Лист Ratios\n"
-        "CAPEX (incl. SPV costs). Раздел Project IRR.\n"
-        "Лист P&L\n"
-        "EBITDA"
-    )
+    assert full == _CATALOG_TABLE
     construction = catalog_reply(rows, "что есть на листе Construction")
-    assert construction == "Лист Construction\nCAPEX"
+    assert construction == _CONSTRUCTION_TABLE
     assert "EBITDA" not in construction
+    assert "Input Assumptions" not in construction
+
+
+def test_catalog_table_escapes_a_pipe_and_joins_a_broken_label() -> None:
+    piped = catalog_reply(
+        [catalog_row("debt", "A | B", sheet="Debt", label_path=["X"])],
+        "",
+    )
+    assert "| A \\| B | X |" in piped
+    assert "A | B" not in piped
+    assert piped.count("| --- | --- |") == 1
+    broken = catalog_reply([catalog_row("split", "A\nB", sheet="Debt")], "")
+    assert "| A B | |" in broken
+    data_rows = [
+        line
+        for line in broken.splitlines()
+        if line.startswith("| ") and not line.startswith("| Атрибут") and set(line) != set("| -")
+    ]
+    assert data_rows == ["| A B | |"]
+    assert catalog_reply([], "") == ""
+
+
+def test_goal_question_names_the_book_and_four_actions() -> None:
+    asked = goal_question(_FILE)
+    assert asked.startswith(f"Книга {_FILE} открыта.")
+    assert "Что посмотреть?" in asked
+    assert "1. Обзор книги" in asked
+    assert "2. Перечень атрибутов" in asked
+    assert "3. Одну метрику" in asked
+    assert "4. Другой файл" in asked
+    assert goal_question("  ").startswith("Книга открыта.")
+    accepted = {
+        "1": "overview",
+        "№1": "overview",
+        "1.": "overview",
+        "обзор книги": "overview",
+        "1. обзор книги": "overview",
+        "2": "catalog",
+        "№2": "catalog",
+        "2.": "catalog",
+        "перечень атрибутов": "catalog",
+        "2. перечень атрибутов": "catalog",
+        "3": "figure",
+        "№3": "figure",
+        "3.": "figure",
+        "одну метрику": "figure",
+        "3. одну метрику": "figure",
+        "4": "files",
+        "№4": "files",
+        "4.": "files",
+        "другой файл": "files",
+        "4. другой файл": "files",
+    }
+    for reply, act in accepted.items():
+        assert match_goal(reply) == act
+        assert match_goal(f"  {reply.upper()}  ") == act
+    for reply in ("", "   ", "обзор", "давай номер 1", "открой", "первый", "Какой EBITDA в Y1?"):
+        assert match_goal(reply) is None
